@@ -1,0 +1,5 @@
+# database files
+*.db
+
+# config files
+*.json
