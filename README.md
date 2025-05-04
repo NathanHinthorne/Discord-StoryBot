@@ -17,17 +17,14 @@
 ## 🛠 Commands
 
 ### Core Story Commands
-- `!startstory [prompt or genre]`  
-  Start a new story. Gemini will generate the opening paragraph.
+- `!startstory <your text>`  
+  Start a new story with your opening text.
 
-- `!addstory <your text>`  
+- `!add <your text>`  
   Add your part to the story. The bot appends it in order.
 
 - `!endstory`  
-  Finalizes the story. Gemini can write an epilogue or closing.
-
-- `!savestory`  
-  Saves the current story. Options to post, export, or archive.
+  Finalizes the story. Gemini can write an epilogue to wrap it up.
 
 ---
 
@@ -40,12 +37,6 @@
 
 - `!plotwist`  
   Gemini generates and inserts a surprise twist.
-
-- `!character [optional role/type]`  
-  Adds a new character idea (e.g., villain, mentor, creature).
-
-- `!setting [optional theme]`  
-  Adds a new scene or world location.
 
 ---
 
