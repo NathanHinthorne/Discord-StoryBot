@@ -1,6 +1,6 @@
 import queue
 import threading
-from narrator_bot import run_bot
+from story_bot import run_bot
 
 class BotConnector:
     def __init__(self, token):

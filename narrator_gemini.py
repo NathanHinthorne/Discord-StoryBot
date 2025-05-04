@@ -1,5 +1,5 @@
 import google.generativeai as genai
-from google.generativeai import types
+from google.generativeai.types import GenerationConfig
 from typing import List, Optional, Dict
 import sqlite3
 from datetime import datetime
@@ -14,26 +14,21 @@ logger = logging.getLogger('narrator_gemini')
 
 class NarratorGemini:
     def __init__(self, api_key: str, db_path: str = "stories.db"):
-        self.client = genai.Client(api_key=api_key)
+        genai.configure(api_key=api_key)
+        self.model = genai.GenerativeModel("gemini-2.0-flash")
+        
         self.db_path = db_path
         
         # Load model configurations
-        self.model_config = types.GenerateContentConfig(
+        self.model_config = GenerationConfig(
             temperature=0.7,
             top_p=0.8,
             top_k=40,
-            max_output_tokens=1000,
+            max_output_tokens=1000
         )
 
         # System prompts for different functions
         self.prompts = {
-            "story_start": """You are a creative writing assistant. Generate an engaging opening 
-            paragraph for a story. If a genre is provided, make it fit that genre. Keep it under 
-            150 words and make it open-ended to allow for collaborative continuation.
-            
-            Genre: {genre}
-            """,
-            
             "narrator_intervention": """You are a skilled story narrator. Review the current story 
             and provide a brief narrative intervention (2-3 sentences) that helps transition between 
             the previous contributions while maintaining the story's tone and advancing the plot.
@@ -63,26 +58,14 @@ class NarratorGemini:
             
             "plot_twist": """Generate an unexpected but coherent plot twist that could be 
             introduced into the current story. Make it surprising but consistent with the 
-            established narrative.
+            established narrative. Keep it under 300 words and ensure it's 2 paragraphs. 
+            Do not include information about why the twist happens.
             
             Story so far:
             {story_text}
             Genre: {genre}
             """
         }
-
-    @retry(tries=3, delay=2, backoff=2)
-    async def generate_story_start(self, genre: Optional[str] = None) -> str:
-        """Generate an opening for a new story"""
-        prompt = self.prompts["story_start"].format(genre=genre or "any")
-        
-        response = self.client.models.generate_content(
-            model="gemini-2.0-flash",
-            config=self.model_config,
-            contents=prompt
-        )
-        
-        return response.text.strip()
 
     async def get_story_context(self, story_id: int) -> Dict:
         """Retrieve story context from database"""
@@ -122,9 +105,8 @@ class NarratorGemini:
             recent_contributions="\n".join(story_context["recent_contributions"])
         )
         
-        response = self.client.models.generate_content(
-            model="gemini-2.0-flash",
-            config=self.model_config,
+        response = self.model.generate_content(
+            generation_config=self.model_config,
             contents=prompt
         )
         
@@ -135,9 +117,8 @@ class NarratorGemini:
         """Generate a recap of the story so far"""
         prompt = self.prompts["story_recap"].format(story_text=story_text)
         
-        response = self.client.models.generate_content(
-            model="gemini-2.0-flash",
-            config=self.model_config,
+        response = self.model.generate_content(
+            generation_config=self.model_config,
             contents=prompt
         )
         
@@ -151,9 +132,8 @@ class NarratorGemini:
             genre=story_context["genre"]
         )
         
-        response = self.client.models.generate_content(
-            model="gemini-2.0-flash",
-            config=self.model_config,
+        response = self.model.generate_content(
+            generation_config=self.model_config,
             contents=prompt
         )
         
@@ -163,13 +143,12 @@ class NarratorGemini:
     async def generate_plot_twist(self, story_context: Dict) -> str:
         """Generate a plot twist for the current story"""
         prompt = self.prompts["plot_twist"].format(
-            story_text=story_context["current_text"][-1000:],
-            genre=story_context["genre"]
+            story_text=story_context["current_text"][-1000:]
+            # TODO: accept list of story characters as context
         )
         
-        response = self.client.models.generate_content(
-            model="gemini-2.0-flash",
-            config=self.model_config,
+        response = self.model.generate_content(
+            generation_config=self.model_config,
             contents=prompt
         )
         

@@ -7,7 +7,7 @@ from bot_connector import BotConnector
 
 CUSTOM_ICON = "./app-icon-small.ico"
 
-class NarratorBotGUI(ttk.Window):
+class StoryBotGUI(ttk.Window):
     def __init__(self):
         super().__init__(themename="darkly")
 
@@ -28,7 +28,7 @@ class NarratorBotGUI(ttk.Window):
         # Setup GUI update loop
         self.after(100, self.check_bot_updates)
         
-        self.title("Narrator Bot Admin Interface")
+        self.title("Story Bot Admin Interface")
         self.geometry("1200x800")
         
         # Create main container
@@ -44,6 +44,22 @@ class NarratorBotGUI(ttk.Window):
         self.setup_story_monitor()
         self.setup_control_panel()
         self.setup_status_bar()
+
+        # Initialize settings from config
+        self.api_key_entry.delete(0, END)
+        self.api_key_entry.insert(0, self.config.get("gemini_api_key", ""))
+        self.rate_limit_spinbox.set(self.config.get("rate_limit", 60))
+        self.max_length_spinbox.set(self.config.get("max_contribution_length", 200))
+        self.intervention_spinbox.set(self.config.get("narrator_intervention_frequency", 5))
+
+        # Add this after other initialization code
+        self.protocol("WM_DELETE_WINDOW", self.on_closing)
+
+    def on_closing(self):
+        """Clean up resources before closing"""
+        if self.bot_connector:
+            self.bot_connector.stop()
+        self.quit()
 
     def new_story(self):
         """Start a new story"""
@@ -66,17 +82,20 @@ class NarratorBotGUI(ttk.Window):
     def generate_recap(self):
         """Generate a recap of the current story"""
         self.status_label.configure(text="Generating recap...", bootstyle=INFO)
+        #TODO Implement recap generation
 
     def export_to_gdoc(self):
         """Export the current story to Google Docs"""
         self.status_label.configure(text="Exporting to Google Docs...", bootstyle=INFO)
+        #TODO Implement Google Docs export
 
     def export_to_pastebin(self):
         """Export the current story to Pastebin"""
         self.status_label.configure(text="Exporting to Pastebin...", bootstyle=INFO)
+        #TODO Implement Pastebin export
 
     def save_settings(self):
-        """Save current settings to config file"""
+        """Save current settings to config file and update bot"""
         self.config.update({
             "gemini_api_key": self.api_key_entry.get(),
             "rate_limit": int(self.rate_limit_spinbox.get()),
@@ -84,8 +103,20 @@ class NarratorBotGUI(ttk.Window):
             "narrator_intervention_frequency": int(self.intervention_spinbox.get())
         })
         
+        # Save to config file
         with open("config.json", "w") as f:
             json.dump(self.config, f, indent=4)
+        
+        # Save to bot settings file
+        bot_settings = {
+            "rate_limit": int(self.rate_limit_spinbox.get()),
+            "max_contribution_length": int(self.max_length_spinbox.get()),
+            "narrator_intervention_frequency": int(self.intervention_spinbox.get())
+        }
+        with open("bot_settings.json", "w") as f:
+            json.dump(bot_settings, f, indent=4)
+        
+        self.status_label.configure(text="Settings saved", bootstyle=SUCCESS)
 
     def check_bot_updates(self):
         update = self.bot_connector.get_update()
@@ -104,6 +135,8 @@ class NarratorBotGUI(ttk.Window):
         elif update_type == "new_story":
             self.story_text.delete(1.0, END)
             self.story_text.insert(END, data.current_text)
+            self.contributions_tree.delete(*self.contributions_tree.get_children())
+            self.status_label.configure(text="New story started", bootstyle=SUCCESS)
             
         elif update_type == "new_contribution":
             story = data["story"]
@@ -123,11 +156,12 @@ class NarratorBotGUI(ttk.Window):
                     contribution.content
                 )
             )
-        
+            self.status_label.configure(text="New contribution added", bootstyle=SUCCESS)
+            
         elif update_type == "story_ended":
             self.story_text.delete(1.0, END)
             self.contributions_tree.delete(*self.contributions_tree.get_children())
-            self.status_label.configure(text="Story ended")
+            self.status_label.configure(text="Story ended", bootstyle=INFO)
 
     def setup_story_monitor(self):
         # Story Monitor Section
@@ -277,8 +311,12 @@ class NarratorBotGUI(ttk.Window):
         self.api_status.pack(side=RIGHT)
 
 if __name__ == "__main__":
-    app = NarratorBotGUI()
+    app = StoryBotGUI()
     app.mainloop()
+
+
+
+
 
 
 
