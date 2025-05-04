@@ -13,7 +13,6 @@ from discord import app_commands
 from google_docs_exporter import GoogleDocsExporter
 import os
 from dotenv import load_dotenv
-import webserver
 
 load_dotenv()
 
@@ -751,5 +750,4 @@ def run_bot(token, gui_queue=None):
     bot.run(token)
 
 if __name__ == "__main__":
-    webserver.keep_alive()
     run_bot(os.environ["DISCORD_BOT_TOKEN"])
