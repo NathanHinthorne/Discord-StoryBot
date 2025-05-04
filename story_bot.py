@@ -12,6 +12,10 @@ from narrator_gemini import NarratorGemini
 from discord import app_commands
 from google_docs_exporter import GoogleDocsExporter
 import os
+from dotenv import load_dotenv
+import webserver
+
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -96,12 +100,14 @@ class StoryBot(commands.Bot):
         ] 
 
         # Initialize Gemini backend
-        with open("config.json") as f:
-            config = json.load(f)
-        self.gemini = NarratorGemini(config["gemini_api_key"])
+        self.gemini = NarratorGemini(os.environ["GEMINI_API_KEY"])
 
+        # TODO: fix this broken credential setup
         # Initialize Google Docs exporter if credentials exist
-        credentials_path = config.get("google_credentials_path", "google_credentials.json")
+        # credentials_path = config.get("google_credentials_path", "google_credentials.json")
+
+        # temp path
+        credentials_path = "google_credentials.json"
         if os.path.exists(credentials_path):
             self.docs_exporter = GoogleDocsExporter(credentials_path, logger=logger)
             logger.info("Google Docs exporter initialized")
@@ -109,8 +115,12 @@ class StoryBot(commands.Bot):
             self.docs_exporter = None
             logger.warning(f"Google credentials not found at {credentials_path}, export feature will be disabled")
         
+        # display current config
+        logger.info(f"Loaded settings: {self.settings}")
+
         # Load active stories from database
         self.load_active_stories()
+
     
     def load_settings(self):
         try:
@@ -118,7 +128,7 @@ class StoryBot(commands.Bot):
                 return json.load(f)
         except FileNotFoundError:
             default_settings = {
-                "max_contribution_length": 200,
+                "max_contribution_length": 300,
                 "narrator_intervention_frequency": 5,
                 "rate_limit": 60
             }
@@ -405,38 +415,38 @@ class StoryBot(commands.Bot):
             await interaction.followup.send(f"**{interaction.user.display_name}:** {content}")
             
             # Check if narrator should intervene
-            if story.last_narrator_intervention >= self.settings["narrator_intervention_frequency"]:
-                enhancement = await self.gemini.generate_narrator_intervention({
-                    "current_text": story.current_text,
-                    "recent_contributions": [c.content for c in story.contributions[-5:]]
-                })
+            # if story.last_narrator_intervention >= self.settings["narrator_intervention_frequency"]:
+            #     enhancement = await self.gemini.generate_narrator_intervention({
+            #         "current_text": story.current_text,
+            #         "recent_contributions": [c.content for c in story.contributions[-5:]]
+            #     })
                 
-                # Update database with narrator's intervention
-                with sqlite3.connect(self.db.db_path) as conn:
-                    cursor = conn.cursor()
-                    cursor.execute("""
-                        UPDATE stories 
-                        SET final_text = ?
-                        WHERE story_id = ?
-                    """, (story.current_text + f"\n{enhancement}", story.story_id))
+            #     # Update database with narrator's intervention
+            #     with sqlite3.connect(self.db.db_path) as conn:
+            #         cursor = conn.cursor()
+            #         cursor.execute("""
+            #             UPDATE stories 
+            #             SET final_text = ?
+            #             WHERE story_id = ?
+            #         """, (story.current_text + f"\n{enhancement}", story.story_id))
                     
-                    # Add narrator's contribution
-                    cursor.execute("""
-                        INSERT INTO contributions (story_id, user_id, username, display_name, content, timestamp)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                    """, (
-                        story.story_id,
-                        "NARRATOR",
-                        "Narrator",
-                        enhancement,
-                        datetime.now()
-                    ))
+            #         # Add narrator's contribution
+            #         cursor.execute("""
+            #             INSERT INTO contributions (story_id, user_id, username, display_name, content, timestamp)
+            #             VALUES (?, ?, ?, ?, ?, ?)
+            #         """, (
+            #             story.story_id,
+            #             "NARRATOR",
+            #             "Narrator",
+            #             enhancement,
+            #             datetime.now()
+            #         ))
                 
-                story.current_text += f"\n{enhancement}"
-                story.last_narrator_intervention = 0
+            #     story.current_text += f"\n{enhancement}"
+            #     story.last_narrator_intervention = 0
                 
-                # Send narrator's response as a separate message
-                await interaction.channel.send(f"🎭 **Narrator:** {enhancement}")
+            #     # Send narrator's response as a separate message
+            #     await interaction.channel.send(f"🎭 **Narrator:** {enhancement}")
             
             # Update GUI if connected
             if self.gui_queue:
@@ -741,10 +751,5 @@ def run_bot(token, gui_queue=None):
     bot.run(token)
 
 if __name__ == "__main__":
-    # When running standalone (without GUI)
-    with open("config.json") as f:
-        config = json.load(f)
-    run_bot(config["discord_token"])
-
-
-
+    webserver.keep_alive()
+    run_bot(os.environ["DISCORD_BOT_TOKEN"])
