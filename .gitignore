@@ -3,3 +3,12 @@
 
 # config files
 *.json
+
+# unnecessary folders
+__pycache__
+development
+docs
+docs_scripts
+gallery
+gemini_examples
+src
