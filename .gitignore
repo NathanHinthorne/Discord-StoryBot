@@ -3,6 +3,7 @@
 
 # config files
 *.json
+*.env
 
 # unnecessary folders
 __pycache__
