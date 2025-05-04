@@ -1,6 +1,6 @@
-# 📖 Narrator Bot (Working Title)
+# 📖 Story Bot (Working Title)
 
-**Narrator Bot** is a collaborative storytelling Discord bot powered by the Gemini API. It enables users to co-author stories, generate characters and settings, and explore creativity together in a structured, gamified format.
+**Story Bot** is a collaborative storytelling Discord bot powered by the Gemini API. It enables users to co-author stories, generate characters and settings, and explore creativity together in a structured, gamified format.
 
 ---
 
