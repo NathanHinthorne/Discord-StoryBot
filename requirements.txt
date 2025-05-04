@@ -1,7 +1,8 @@
 discord.py>=2.0.0
-google-generativeai>=1.7.0
+google-generativeai>=0.8.0
 ttkbootstrap>=1.0.0
 pillow>=9.0.0
 python-dotenv>=1.0.0
 aiohttp>=3.8.0
 sqlite3-api>=0.1.0
+flask>=3.0.0
