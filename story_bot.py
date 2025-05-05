@@ -18,7 +18,7 @@ from google_docs_exporter import GoogleDocsExporter
 from firebase_db import FirebaseDatabase
 import webserver
 
-load_dotenv()
+load_dotenv() #? move to init?
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -74,12 +74,8 @@ class StoryBot(commands.Bot):
         # Initialize Gemini backend with Firebase DB
         self.gemini = NarratorGemini(os.environ["GEMINI_API_KEY"], firebase_db=self.db.db)
 
-        # TODO: fix this broken credential setup
         # Initialize Google Docs exporter if credentials exist
-        # credentials_path = config.get("google_credentials_path", "google_credentials.json")
-
-        # temp path
-        credentials_path = "google_credentials.json"
+        credentials_path = os.environ.get("GOOGLE_CREDENTIALS_PATH", "google_credentials.json")
         if os.path.exists(credentials_path):
             self.docs_exporter = GoogleDocsExporter(credentials_path, logger=logger)
             logger.info("Google Docs exporter initialized")
