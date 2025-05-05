@@ -1,6 +1,6 @@
 import json
 
-INPUT_FILE_PATH = "firebase_credentials.json"
+INPUT_FILE_PATH = "google-credentials.json"
 
 with open(INPUT_FILE_PATH) as f:
     cred = json.load(f)
