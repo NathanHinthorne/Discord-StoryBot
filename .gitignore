@@ -1,5 +1,6 @@
 # database files
 *.db
+*.csv
 
 # config files
 *.json
