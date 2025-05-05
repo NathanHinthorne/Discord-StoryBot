@@ -3,6 +3,7 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 import logging
+from datetime import datetime
 
 class GoogleDocsExporter:
     def __init__(self, credentials_path="google_credentials.json", logger=None):
@@ -32,18 +33,18 @@ class GoogleDocsExporter:
         Export story to a Google Doc
         
         Args:
-            story: Story data from database
-            contributions: List of contributions
-            
+            story: Story data from Firestore
+            contributions: List of contributions from Firestore
+        
         Returns:
             Tuple of (success, doc_url or error_message)
         """
         if not self.is_available():
             return False, "Google Docs API credentials not available"
-            
+        
         try:
             # Create a new Google Doc
-            doc_title = f"{story['title']} - {story['genre'] or 'No Genre'}"
+            doc_title = f"{story.get('title', 'Untitled Story')}"
             doc = self.docs_service.documents().create(body={'title': doc_title}).execute()
             doc_id = doc.get('documentId')
             
@@ -58,12 +59,20 @@ class GoogleDocsExporter:
                 }
             })
             
+            # Format timestamps for metadata
+            started_at = story.get('started_at')
+            if hasattr(started_at, 'timestamp'):
+                started_at = datetime.fromtimestamp(started_at.timestamp()).isoformat()
+                
+            ended_at = story.get('ended_at')
+            if hasattr(ended_at, 'timestamp'):
+                ended_at = datetime.fromtimestamp(ended_at.timestamp()).isoformat()
+            
             # Add story metadata
             metadata_text = (
-                f"Genre: {story['genre'] or 'Not specified'}\n"
-                f"Started: {story['started_at']}\n"
-                f"Completed: {story['ended_at']}\n\n"
-                f"Contributors: {', '.join(set(c['username'] for c in contributions))}\n\n"
+                f"Started: {started_at}\n"
+                f"Completed: {ended_at}\n\n"
+                f"Contributors: {', '.join(set(c.get('username') for c in contributions))}\n\n"
                 "=== STORY ===\n\n"
             )
             
@@ -74,18 +83,18 @@ class GoogleDocsExporter:
                 }
             })
             
-            # Add story text - either add full text or each contribution separately
-            if story['final_text']:
+            # Add story text
+            if story.get('final_text'):
                 requests.append({
                     'insertText': {
                         'location': {'index': len(doc_title) + 3 + len(metadata_text)},
-                        'text': story['final_text']
+                        'text': story.get('final_text')
                     }
                 })
             else:
                 # Fallback to using contributions if final_text is empty
                 contributions_text = "\n\n".join([
-                    f"**{c['username']}**: {c['content']}" for c in contributions
+                    f"**{c.get('username')}**: {c.get('content')}" for c in contributions
                 ])
                 requests.append({
                     'insertText': {
@@ -112,16 +121,8 @@ class GoogleDocsExporter:
             # Get the document URL
             doc_url = f"https://docs.google.com/document/d/{doc_id}/edit"
             
-            # Update the database with the doc URL
-            with sqlite3.connect(story['db_path']) as conn:
-                conn.execute("""
-                    UPDATE stories
-                    SET doc_url = ?
-                    WHERE story_id = ?
-                """, (doc_url, story['story_id']))
-            
             return True, doc_url
-            
+        
         except HttpError as error:
             self.logger.error(f"Google Docs API error: {error}")
             return False, f"Google Docs API error: {error}"

@@ -8,11 +8,14 @@ from dataclasses import dataclass
 from typing import Optional, List
 import json
 import logging
-from narrator_gemini import NarratorGemini
 from discord import app_commands
-from google_docs_exporter import GoogleDocsExporter
 import os
 from dotenv import load_dotenv
+
+# Import custom modules
+from narrator_gemini import NarratorGemini
+from google_docs_exporter import GoogleDocsExporter
+from firebase_db import FirebaseDatabase
 import webserver
 
 load_dotenv()
@@ -38,37 +41,6 @@ class ActiveStory:
     contributions: List[StoryContribution]
     last_narrator_intervention: int  # contribution count since last intervention
     started_at: datetime
-    
-class StoryDatabase:
-    def __init__(self, db_path="stories.db"):
-        self.db_path = db_path
-        self.setup_database()
-    
-    def setup_database(self):
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS stories (
-                    story_id INTEGER PRIMARY KEY,
-                    channel_id TEXT,
-                    title TEXT,
-                    opening_text TEXT,
-                    final_text TEXT,
-                    started_at TIMESTAMP,
-                    ended_at TIMESTAMP
-                )
-            """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS contributions (
-                    contribution_id INTEGER PRIMARY KEY,
-                    story_id INTEGER,
-                    user_id TEXT,
-                    username TEXT,
-                    display_name TEXT,
-                    content TEXT,
-                    timestamp TIMESTAMP,
-                    FOREIGN KEY (story_id) REFERENCES stories (story_id)
-                )
-            """)
 
 class StoryBot(commands.Bot):
     def __init__(self, command_prefix="/", gui_queue=None):
@@ -84,7 +56,7 @@ class StoryBot(commands.Bot):
         )
         
         self.active_stories = {}  # channel_id: ActiveStory
-        self.db = StoryDatabase()
+        self.db = FirebaseDatabase()  # Use Firebase instead of SQLite
         self.gui_queue = gui_queue
         self.settings = self.load_settings()
         self.designated_channels = self.load_designated_channels()
@@ -99,8 +71,8 @@ class StoryBot(commands.Bot):
             "I think I'll disobey that command :wink:"
         ] 
 
-        # Initialize Gemini backend
-        self.gemini = NarratorGemini(os.environ["GEMINI_API_KEY"])
+        # Initialize Gemini backend with Firebase DB
+        self.gemini = NarratorGemini(os.environ["GEMINI_API_KEY"], firebase_db=self.db.db)
 
         # TODO: fix this broken credential setup
         # Initialize Google Docs exporter if credentials exist
@@ -147,28 +119,20 @@ class StoryBot(commands.Bot):
         with open("designated_channels.json", "w") as f:
             json.dump(self.designated_channels, f)
     
-    async def get_story_context(self, story_id: int) -> dict:
-        """Retrieve comprehensive story context from database"""
-        with sqlite3.connect(self.db.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT s.title, s.opening_text, s.final_text, 
-                       GROUP_CONCAT(c.content, '\n') as recent_contributions
-                FROM stories s
-                LEFT JOIN contributions c ON s.story_id = c.story_id
-                WHERE s.story_id = ?
-                GROUP BY s.story_id
-            """, (story_id,))
-            result = cursor.fetchone()
-            
-            if result:
-                return {
-                    "title": result[0],
-                    "opening_text": result[1],
-                    "full_text": result[2],
-                    "recent_contributions": result[3].split('\n') if result[3] else []
-                }
+    async def get_story_context(self, story_id: str) -> dict:
+        """Retrieve comprehensive story context from Firestore"""
+        story = self.db.get_story(story_id)
+        if not story:
             return None
+        
+        contributions = self.db.get_contributions(story_id)
+        
+        return {
+            "title": story.get('title', ''),
+            "opening_text": story.get('opening_text', ''),
+            "full_text": story.get('final_text', ''),
+            "recent_contributions": [c.get('content', '') for c in contributions.values()]
+        }
     
     async def setup_hook(self):
         """Setup hook for Discord.py to register slash commands"""
@@ -290,24 +254,17 @@ class StoryBot(commands.Bot):
             # Let the user know we're processing
             await interaction.response.defer(thinking=True)
             
-            # Create new story in database first
-            with sqlite3.connect(self.db.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute("""
-                    INSERT INTO stories (channel_id, title, opening_text, final_text, started_at, ended_at)
-                    VALUES (?, ?, ?, ?, ?, NULL)
-                """, (
-                    str(interaction.channel_id),
-                    f"Story-{datetime.now().strftime('%Y%m%d-%H%M')}",
-                    opening_text,
-                    opening_text,  # Use opening_text as the initial final_text
-                    datetime.now()
-                ))
-                story_id = cursor.lastrowid
+            # Create new story in Firebase
+            title = f"Story-{datetime.now().strftime('%Y%m%d-%H%M')}"
+            story_id = self.db.create_story(
+                channel_id=str(interaction.channel_id),
+                title=title,
+                opening_text=opening_text
+            )
             
             story = ActiveStory(
                 channel_id=str(interaction.channel_id),
-                title=f"Story-{datetime.now().strftime('%Y%m%d-%H%M')}",
+                title=title,
                 opening_text=opening_text,
                 current_text=opening_text,
                 contributions=[],
@@ -351,22 +308,17 @@ class StoryBot(commands.Bot):
                 await interaction.response.send_message(f"❌ Contribution too long! Max length: {self.settings['max_contribution_length']} characters")
                 return
             
-            if random.random() < self.deny_request_percentage:
-                await interaction.response.send_message(random.choice(self.possible_denial_reasons))
-                return
-            
             # Let the user know we're processing
             await interaction.response.defer(thinking=True)
             
             story = self.active_stories[interaction.channel_id]
             
-            # Validate contribution using Gemini
+            # Get story context for validation
             story_context = {
                 "current_text": story.current_text,
-                # TODO: Send list of story characters as context
-                "recent_contributions": [c.content for c in story.contributions[-5:]]
+                "recent_contributions": [c.content for c in story.contributions[-5:]] if story.contributions else []
             }
-
+            
             # Don't let same user go twice in a row
             if story.contributions and story.contributions[-1].user_id == str(interaction.user.id) and not interaction.user.guild_permissions.administrator:
                 await interaction.followup.send("❌ You just went! Please wait for someone else to contribute before adding another line.")
@@ -384,31 +336,23 @@ class StoryBot(commands.Bot):
                 timestamp=datetime.now()
             )
             
-            # Update database with new contribution and current story state
-            with sqlite3.connect(self.db.db_path) as conn:
-                cursor = conn.cursor()
-                # Update story's current text
-                cursor.execute("""
-                    UPDATE stories 
-                    SET final_text = ?
-                    WHERE story_id = ?
-                """, (story.current_text + f"\n{content}", story.story_id))
-                
-                # Add new contribution
-                cursor.execute("""
-                    INSERT INTO contributions (story_id, user_id, username, display_name, content, timestamp)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                """, (
-                    story.story_id,
-                    contribution.user_id,
-                    contribution.username,
-                    contribution.display_name,
-                    contribution.content,
-                    contribution.timestamp
-                ))
+            # Update Firebase with new contribution
+            self.db.add_contribution(
+                story_id=story.story_id,
+                user_id=contribution.user_id,
+                username=contribution.username,
+                display_name=contribution.display_name,
+                content=contribution.content
+            )
+            
+            # Update story's current text in Firebase
+            updated_text = story.current_text + f"\n{content}"
+            self.db.update_story(story.story_id, {
+                'final_text': updated_text
+            })
             
             story.contributions.append(contribution)
-            story.current_text += f"\n{content}"
+            story.current_text = updated_text
             story.last_narrator_intervention += 1
             
             # Send their contribution
@@ -422,27 +366,21 @@ class StoryBot(commands.Bot):
             #     })
                 
             #     # Update database with narrator's intervention
-            #     with sqlite3.connect(self.db.db_path) as conn:
-            #         cursor = conn.cursor()
-            #         cursor.execute("""
-            #             UPDATE stories 
-            #             SET final_text = ?
-            #             WHERE story_id = ?
-            #         """, (story.current_text + f"\n{enhancement}", story.story_id))
-                    
-            #         # Add narrator's contribution
-            #         cursor.execute("""
-            #             INSERT INTO contributions (story_id, user_id, username, display_name, content, timestamp)
-            #             VALUES (?, ?, ?, ?, ?, ?)
-            #         """, (
-            #             story.story_id,
-            #             "NARRATOR",
-            #             "Narrator",
-            #             enhancement,
-            #             datetime.now()
-            #         ))
+            #     updated_text = story.current_text + f"\n{enhancement}"
+            #     self.db.update_story(story.story_id, {
+            #         'final_text': updated_text
+            #     })
                 
-            #     story.current_text += f"\n{enhancement}"
+            #     # Add narrator's contribution to Firestore
+            #     self.db.add_contribution(
+            #         story_id=story.story_id,
+            #         user_id="NARRATOR",
+            #         username="Narrator",
+            #         display_name="Narrator",
+            #         content=enhancement
+            #     )
+                
+            #     story.current_text = updated_text
             #     story.last_narrator_intervention = 0
                 
             #     # Send narrator's response as a separate message
@@ -542,18 +480,8 @@ class StoryBot(commands.Bot):
             
             story = self.active_stories[interaction.channel_id]
             
-            # Mark story as ended in the database
-            with sqlite3.connect(self.db.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute("""
-                    UPDATE stories
-                    SET final_text = ?, ended_at = ?
-                    WHERE story_id = ?
-                """, (
-                    story.current_text,
-                    datetime.now(),
-                    story.story_id
-                ))
+            # Mark story as ended in Firebase
+            self.db.end_story(story.story_id, story.current_text)
             
             # Generate final summary
             final_summary = await self.gemini.generate_story_recap(story.current_text)
@@ -565,7 +493,6 @@ class StoryBot(commands.Bot):
                     "data": story
                 })
             
-            # Store story details for export if user wants it
             # Remove the story from active stories
             del self.active_stories[interaction.channel_id]
             
@@ -590,7 +517,7 @@ class StoryBot(commands.Bot):
             self.pending_exports[export_msg.id] = story.story_id
 
         @self.tree.command(name="exportstory", description="Export the latest story to Google Docs")
-        async def export_story(interaction: discord.Interaction, story_id: Optional[int] = None):
+        async def export_story(interaction: discord.Interaction, story_id: Optional[str] = None):
             """Export a story to Google Docs"""
             if not self.docs_exporter or not self.docs_exporter.is_available():
                 await interaction.response.send_message("❌ Google Docs export is not available. Please ask the bot administrator to set up the Google API credentials.")
@@ -600,33 +527,34 @@ class StoryBot(commands.Bot):
             
             # If no story_id provided, try to get the most recent story for this channel
             if not story_id:
-                with sqlite3.connect(self.db.db_path) as conn:
-                    cursor = conn.cursor()
-                    cursor.execute("""
-                        SELECT story_id FROM stories 
-                        WHERE channel_id = ? 
-                        ORDER BY ended_at DESC LIMIT 1
-                    """, (str(interaction.channel_id),))
-                    result = cursor.fetchone()
-                    
-                    if result:
-                        story_id = result[0]
-                    else:
-                        await interaction.followup.send("❌ No completed stories found for this channel.")
-                        return
+                recent_stories = self.db.get_recent_stories(str(interaction.channel_id), 1)
+                if recent_stories:
+                    story_id = list(recent_stories.keys())[0]
+                else:
+                    await interaction.followup.send("❌ No completed stories found for this channel.")
+                    return
             
-            # Get story data and contributions
-            story, contributions = await self.get_story_data(story_id)
+            # Get story data
+            story = self.db.get_story(story_id)
+            if not story:
+                await interaction.followup.send("❌ Story not found.")
+                return
+            
+            # Get contributions
+            contributions = self.db.get_contributions(story_id)
+            contributions_list = [v for v in contributions.values()]
             
             # Check if the story already has a Google Doc URL
             if story.get('doc_url'):
                 await interaction.followup.send(f"This story has already been exported to Google Docs: {story['doc_url']}")
                 return
-                
+            
             # Export to Google Docs
-            success, result = await self.docs_exporter.export_story_to_doc(story, contributions)
+            success, result = await self.docs_exporter.export_story_to_doc(story, contributions_list)
             
             if success:
+                # Update the doc URL in Firebase
+                self.db.update_story(story_id, {'doc_url': result})
                 await interaction.followup.send(f"✅ Story exported to Google Docs: {result}")
             else:
                 await interaction.followup.send(f"❌ Failed to export story: {result}")
@@ -668,57 +596,52 @@ class StoryBot(commands.Bot):
         await self.process_commands(message)
 
     def load_active_stories(self):
-        """Load active stories from database on startup"""
+        """Load active stories from Firestore on startup"""
         try:
-            with sqlite3.connect(self.db.db_path) as conn:
-                cursor = conn.cursor()
-                # Get stories that have started but not ended
-                cursor.execute("""
-                    SELECT story_id, channel_id, title, opening_text, final_text, started_at
-                    FROM stories
-                    WHERE ended_at IS NULL
-                """)
-                active_story_rows = cursor.fetchall()
+            active_stories_data = self.db.get_active_stories()
+            
+            for story_id, story_data in active_stories_data.items():
+                channel_id = story_data.get('channel_id')
                 
-                for row in active_story_rows:
-                    story_id, channel_id, title, opening_text, current_text, started_at = row
+                # Get contributions for this story
+                contributions_data = self.db.get_contributions(story_id)
+                
+                contributions = []
+                for contrib_id, contrib_data in contributions_data.items():
+                    # Convert Firestore timestamp to datetime
+                    timestamp = contrib_data.get('timestamp')
+                    if hasattr(timestamp, 'timestamp'):  # Check if it's a Firestore timestamp
+                        timestamp = datetime.fromtimestamp(timestamp.timestamp())
                     
-                    # Get contributions for this story
-                    cursor.execute("""
-                        SELECT user_id, username, display_name, content, timestamp
-                        FROM contributions
-                        WHERE story_id = ?
-                        ORDER BY timestamp ASC
-                    """, (story_id,))
-                    contribution_rows = cursor.fetchall()
-                    
-                    contributions = []
-                    for c_row in contribution_rows:
-                        user_id, username, display_name, content, timestamp = c_row
-                        contributions.append(StoryContribution(
-                            user_id=user_id,
-                            username=username,
-                            display_name=display_name,
-                            content=content,
-                            timestamp=datetime.fromisoformat(timestamp)
-                        ))
-                    
-                    # Create ActiveStory object
-                    story = ActiveStory(
-                        channel_id=channel_id,
-                        title=title,
-                        opening_text=opening_text,
-                        current_text=current_text,
-                        contributions=contributions,
-                        last_narrator_intervention=0,  # Reset intervention counter
-                        started_at=datetime.fromisoformat(started_at)
-                    )
-                    story.story_id = story_id
-                    
-                    # Add to active stories dict
-                    self.active_stories[int(channel_id)] = story
-                    
-                logger.info(f"Loaded {len(active_story_rows)} active stories from database")
+                    contributions.append(StoryContribution(
+                        user_id=contrib_data.get('user_id'),
+                        username=contrib_data.get('username'),
+                        display_name=contrib_data.get('display_name'),
+                        content=contrib_data.get('content'),
+                        timestamp=timestamp
+                    ))
+                
+                # Convert Firestore timestamp to datetime
+                started_at = story_data.get('started_at')
+                if hasattr(started_at, 'timestamp'):  # Check if it's a Firestore timestamp
+                    started_at = datetime.fromtimestamp(started_at.timestamp())
+                
+                # Create ActiveStory object
+                story = ActiveStory(
+                    channel_id=channel_id,
+                    title=story_data.get('title'),
+                    opening_text=story_data.get('opening_text'),
+                    current_text=story_data.get('final_text'),
+                    contributions=contributions,
+                    last_narrator_intervention=0,  # Reset intervention counter
+                    started_at=started_at
+                )
+                story.story_id = story_id
+                
+                # Add to active stories dict
+                self.active_stories[int(channel_id)] = story
+                
+            logger.info(f"Loaded {len(active_stories_data)} active stories from Firestore")
         except Exception as e:
             logger.error(f"Error loading active stories: {e}")
 

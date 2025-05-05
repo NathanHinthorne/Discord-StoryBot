@@ -1,23 +1,28 @@
 import google.generativeai as genai
 from google.generativeai.types import GenerationConfig
 from typing import List, Optional, Dict
-import sqlite3
-from datetime import datetime
-import json
 import logging
 from functools import wraps
 from retry import retry
+import firebase_admin
+from firebase_admin import credentials, firestore
+from datetime import datetime
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('narrator_gemini')
 
 class NarratorGemini:
-    def __init__(self, api_key: str, db_path: str = "stories.db"):
+    def __init__(self, api_key: str, firebase_db=None):
         genai.configure(api_key=api_key)
         self.model = genai.GenerativeModel("gemini-2.0-flash")
         
-        self.db_path = db_path
+        # Use the provided Firebase DB instance or create a new connection
+        if firebase_db:
+            self.db = firebase_db
+        else:
+            # This assumes Firebase has already been initialized in the main app
+            self.db = firestore.client()
         
         # Load model configurations
         self.model_config = GenerationConfig(
@@ -47,15 +52,6 @@ class NarratorGemini:
             {story_text}
             """,
             
-            "character_generator": """Create a detailed character that would fit well into the 
-            current story. Include their name, brief physical description, personality, and potential 
-            role in the narrative.
-            
-            Current story context:
-            {story_context}
-            Genre: {genre}
-            """,
-            
             "plot_twist": """Generate an unexpected but coherent plot twist that could be 
             introduced into the current story. Make it surprising but consistent with the 
             established narrative. Keep it under 300 words and ensure it's 2 paragraphs. 
@@ -67,35 +63,31 @@ class NarratorGemini:
             """
         }
 
-    async def get_story_context(self, story_id: int) -> Dict:
-        """Retrieve story context from database"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
+    async def get_story_context(self, story_id: str) -> Dict:
+        """Retrieve story context from Firestore"""
+        # Get story details
+        story_doc = self.db.collection('stories').document(story_id).get()
+        if not story_doc.exists:
+            logger.error(f"Story {story_id} not found")
+            return {}
             
-            # Get story details
-            cursor.execute("""
-                SELECT title, genre, final_text 
-                FROM stories 
-                WHERE story_id = ?
-            """, (story_id,))
-            story_data = cursor.fetchone()
+        story_data = story_doc.to_dict()
+        
+        # Get recent contributions
+        contributions = self.db.collection('contributions')\
+            .where('story_id', '==', story_id)\
+            .order_by('timestamp', direction=firestore.Query.DESCENDING)\
+            .limit(5)\
+            .stream()
             
-            # Get recent contributions
-            cursor.execute("""
-                SELECT content 
-                FROM contributions 
-                WHERE story_id = ? 
-                ORDER BY timestamp DESC 
-                LIMIT 5
-            """, (story_id,))
-            recent_contributions = cursor.fetchall()
-            
-            return {
-                "title": story_data[0],
-                "genre": story_data[1],
-                "current_text": story_data[2],
-                "recent_contributions": [r[0] for r in recent_contributions]
-            }
+        recent_contributions = [doc.to_dict()['content'] for doc in contributions]
+        
+        return {
+            "title": story_data.get('title', ''),
+            "genre": story_data.get('genre', 'fiction'),  # Default to fiction if not specified
+            "current_text": story_data.get('final_text', ''),
+            "recent_contributions": recent_contributions
+        }
 
     @retry(tries=3, delay=2, backoff=2)
     async def generate_narrator_intervention(self, story_context: Dict) -> str:
@@ -125,26 +117,11 @@ class NarratorGemini:
         return response.text.strip()
 
     @retry(tries=3, delay=2, backoff=2)
-    async def generate_character(self, story_context: Dict) -> str:
-        """Generate a new character that fits the story"""
-        prompt = self.prompts["character_generator"].format(
-            story_context=story_context["current_text"][-500:],
-            genre=story_context["genre"]
-        )
-        
-        response = self.model.generate_content(
-            generation_config=self.model_config,
-            contents=prompt
-        )
-        
-        return response.text.strip()
-
-    @retry(tries=3, delay=2, backoff=2)
     async def generate_plot_twist(self, story_context: Dict) -> str:
         """Generate a plot twist for the current story"""
         prompt = self.prompts["plot_twist"].format(
-            story_text=story_context["current_text"][-1000:]
-            # TODO: accept list of story characters as context
+            story_text=story_context["current_text"][-1000:],
+            genre=story_context.get("genre", "fiction")
         )
         
         response = self.model.generate_content(
