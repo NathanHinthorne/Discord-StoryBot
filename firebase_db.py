@@ -14,11 +14,12 @@ class FirebaseDatabase:
     def __init__(self):
         load_dotenv()
         
-        # Initialize Firebase with credentials
-        cred_path = os.environ.get("FIREBASE_CREDENTIALS_PATH", "firebase_credentials.json")
+        # Parse JSON string from environment variable
+        # This approach avoids the need to write the credentials to a file
+        cred_dict = json.loads(os.environ.get("FIREBASE_CREDENTIALS_JSON"))
         
         try:
-            cred = credentials.Certificate(cred_path)
+            cred = credentials.Certificate(cred_dict)
             firebase_admin.initialize_app(cred)
             self.db = firestore.client()
             logger.info("Firestore database initialized successfully")

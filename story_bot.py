@@ -74,14 +74,8 @@ class StoryBot(commands.Bot):
         # Initialize Gemini backend with Firebase DB
         self.gemini = NarratorGemini(os.environ["GEMINI_API_KEY"], firebase_db=self.db.db)
 
-        # Initialize Google Docs exporter if credentials exist
-        credentials_path = os.environ.get("GOOGLE_CREDENTIALS_PATH", "google_credentials.json")
-        if os.path.exists(credentials_path):
-            self.docs_exporter = GoogleDocsExporter(credentials_path, logger=logger)
-            logger.info("Google Docs exporter initialized")
-        else:
-            self.docs_exporter = None
-            logger.warning(f"Google credentials not found at {credentials_path}, export feature will be disabled")
+        # Initialize Google Docs exporter
+        self.docs_exporter = GoogleDocsExporter()
         
         # display current config
         logger.info(f"Loaded settings: {self.settings}")

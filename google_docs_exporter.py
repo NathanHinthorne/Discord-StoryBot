@@ -4,25 +4,32 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 import logging
 from datetime import datetime
+import json
+import os
+from dotenv import load_dotenv
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger('google_docs_exporter')
 
 class GoogleDocsExporter:
-    def __init__(self, credentials_path="google_credentials.json", logger=None):
-        self.credentials_path = credentials_path
+    def __init__(self):
+        load_dotenv()
         self.setup_credentials()
-        self.logger = logger or logging.getLogger('google_docs_exporter') # default logger
         
     def setup_credentials(self):
         try:
-            # Load credentials from service account JSON file
-            self.credentials = Credentials.from_service_account_file(
-                self.credentials_path,
-                scopes=['https://www.googleapis.com/auth/documents', 'https://www.googleapis.com/auth/drive']
-            )
+            # Parse JSON string from environment variable
+            # This approach avoids the need to write the credentials to a file
+            # cred_dict = json.loads(os.environ.get("GOOGLE_CREDENTIALS_JSON"))
+            cred_dict = {} # temp
+
+            self.credentials = Credentials.from_service_account_info(cred_dict)
             self.docs_service = build('docs', 'v1', credentials=self.credentials)
             self.drive_service = build('drive', 'v3', credentials=self.credentials)
-            self.logger.info("Google Docs API credentials loaded successfully")
+            logger.info("Google Docs API credentials loaded successfully")
         except Exception as e:
-            self.logger.error(f"Error setting up Google Docs API: {e}")
+            logger.error(f"Error setting up Google Docs API: {e}")
             self.credentials = None
             
     def is_available(self):
@@ -124,8 +131,8 @@ class GoogleDocsExporter:
             return True, doc_url
         
         except HttpError as error:
-            self.logger.error(f"Google Docs API error: {error}")
+            logger.error(f"Google Docs API error: {error}")
             return False, f"Google Docs API error: {error}"
         except Exception as e:
-            self.logger.error(f"Error exporting to Google Docs: {e}")
+            logger.error(f"Error exporting to Google Docs: {e}")
             return False, f"Error: {e}"
