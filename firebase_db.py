@@ -101,3 +101,32 @@ class FirebaseDatabase:
                       .limit(limit)\
                       .stream()
         return {doc.id: doc.to_dict() for doc in stories}
+
+    # Designated channel operations
+    def get_designated_channels(self):
+        """Get all designated channels"""
+        channels_ref = self.db.collection('designated_channels').stream()
+        channels = {}
+        for doc in channels_ref:
+            data = doc.to_dict()
+            channels[doc.id] = data.get('channel_id')
+        return channels
+
+    def set_designated_channel(self, guild_id, channel_id):
+        """Set a designated channel for a guild"""
+        self.db.collection('designated_channels').document(guild_id).set({
+            'channel_id': channel_id,
+            'updated_at': datetime.now()
+        })
+
+    def remove_designated_channel(self, guild_id):
+        """Remove a designated channel for a guild"""
+        self.db.collection('designated_channels').document(guild_id).delete()
+
+    def get_designated_channel(self, guild_id):
+        """Get the designated channel for a guild"""
+        doc = self.db.collection('designated_channels').document(guild_id).get()
+        if doc.exists:
+            return doc.to_dict().get('channel_id')
+        return None
+

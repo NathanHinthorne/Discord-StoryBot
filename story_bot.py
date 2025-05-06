@@ -59,11 +59,12 @@ class StoryBot(commands.Bot):
         self.db = FirebaseDatabase()  # Use Firebase instead of SQLite
         self.gui_queue = gui_queue
         self.settings = self.load_settings()
-        self.designated_channels = self.load_designated_channels()
+        self.designated_channels = {}  # Will be loaded from Firestore
         self.pending_exports = {}  # For tracking export reactions
 
         # personality parameters
-        self.deny_request_percentage = 0 # chance to deny a request because it's "disobeying"
+        self.is_rogue = False
+        self.deny_request_percentage = 0.15 # chance to deny a request because it's "disobeying"
         self.possible_denial_reasons = [
             "Yeah... I'm too lazy to execute that command rn :expressionless:",
             "I don't feel like doing that right now :neutral_face:",
@@ -82,7 +83,9 @@ class StoryBot(commands.Bot):
 
         # Load active stories from database
         self.load_active_stories()
-
+        
+        # Load designated channels from Firestore
+        self.load_designated_channels()
     
     def load_settings(self):
         try:
@@ -99,15 +102,33 @@ class StoryBot(commands.Bot):
             return default_settings
     
     def load_designated_channels(self):
+        """Load designated channels from Firestore"""
         try:
-            with open("designated_channels.json", "r") as f:
-                return json.load(f)
-        except FileNotFoundError:
-            return {}
-    
-    def save_designated_channels(self):
-        with open("designated_channels.json", "w") as f:
-            json.dump(self.designated_channels, f)
+            channels_data = self.db.get_designated_channels()
+            self.designated_channels = channels_data
+            logger.info(f"Loaded {len(channels_data)} designated channels from Firestore")
+        except Exception as e:
+            logger.error(f"Error loading designated channels: {e}")
+            self.designated_channels = {}
+
+    def save_designated_channel(self, guild_id, channel_id):
+        """Save a designated channel to Firestore"""
+        try:
+            self.db.set_designated_channel(guild_id, channel_id)
+            self.designated_channels[guild_id] = channel_id
+            logger.info(f"Saved designated channel {channel_id} for guild {guild_id}")
+        except Exception as e:
+            logger.error(f"Error saving designated channel: {e}")
+
+    def remove_designated_channel(self, guild_id):
+        """Remove a designated channel from Firestore"""
+        try:
+            self.db.remove_designated_channel(guild_id)
+            if guild_id in self.designated_channels:
+                del self.designated_channels[guild_id]
+            logger.info(f"Removed designated channel for guild {guild_id}")
+        except Exception as e:
+            logger.error(f"Error removing designated channel: {e}")
     
     async def get_story_context(self, story_id: str) -> dict:
         """Retrieve comprehensive story context from Firestore"""
@@ -143,15 +164,14 @@ class StoryBot(commands.Bot):
         
         # Administrative commands
         @self.tree.command(name="setchannel", description="Set the current channel as the designated bot channel")
-        @app_commands.default_permissions(administrator=True)
+        @app_commands.checks.has_permissions(administrator=True)
         async def set_channel(interaction: discord.Interaction):
             """Set the current channel as the designated bot channel"""
             guild_id = str(interaction.guild_id)
             channel_id = str(interaction.channel_id)
             
             old_channel = self.designated_channels.get(guild_id)
-            self.designated_channels[guild_id] = channel_id
-            self.save_designated_channels()
+            self.save_designated_channel(guild_id, channel_id)
             
             response = f"✅ Set <#{channel_id}> as the designated bot channel!"
             if old_channel:
@@ -184,14 +204,13 @@ class StoryBot(commands.Bot):
             logger.info(f"Set channel {channel_id} as designated channel for guild {guild_id}")
 
         @self.tree.command(name="removechannel", description="Remove the current designated bot channel")
-        @app_commands.default_permissions(administrator=True)
+        @app_commands.checks.has_permissions(administrator=True)
         async def remove_channel(interaction: discord.Interaction):
             """Remove the current designated bot channel"""
             guild_id = str(interaction.guild_id)
             if guild_id in self.designated_channels:
-                del self.designated_channels[guild_id]
-                self.save_designated_channels()
-                await interaction.response.send_message("✅ Remove the designated bot channel!")
+                self.remove_designated_channel(guild_id)
+                await interaction.response.send_message("✅ Removed the designated bot channel!")
             else:
                 await interaction.response.send_message("❌ No designated bot channel set for this server.")
 
@@ -291,19 +310,18 @@ class StoryBot(commands.Bot):
                 return
             
             if interaction.channel_id not in self.active_stories:
-                await interaction.response.send_message("❌ No active story in this channel! Start one with /startstory")
-                # send private message containing their invalid contribution
-                await interaction.user.send(f"Your attempted contribution: {content}")
+                await interaction.response.send_message("❌ No active story in this channel! Start one with /startstory", ephemeral=True)
+                await interaction.followup.send(f"**Your attempted contribution:** \n\n{content}", ephemeral=True)
                 return
             
             if len(content) > self.settings["max_contribution_length"]:
-                await interaction.response.send_message(f"❌ Contribution too long! Max length: {self.settings['max_contribution_length']} characters")
-                await interaction.user.send(f"Your attempted contribution: {content}")
+                await interaction.response.send_message(f"❌ Contribution too long! Max length: {self.settings['max_contribution_length']} characters", ephemeral=True)
+                await interaction.followup.send(f"**Your attempted contribution:** \n\n{content}", ephemeral=True)
                 return
             
             if random.random() < self.deny_request_percentage:
                 await interaction.response.send_message(random.choice(self.possible_denial_reasons))
-                await interaction.user.send(f"Your attempted contribution: {content}")
+                await interaction.followup.send(f"**Your attempted contribution:** \n\n{content}", ephemeral=True)
                 return
             
             # Let the user know we're processing
@@ -319,13 +337,13 @@ class StoryBot(commands.Bot):
             
             # Don't let same user go twice in a row
             if story.contributions and story.contributions[-1].user_id == str(interaction.user.id) and not interaction.user.guild_permissions.administrator:
-                await interaction.followup.send("❌ You just went! Please wait for someone else to contribute before adding another line.")
-                await interaction.user.send(f"Your attempted contribution: {content}")
+                await interaction.followup.send("❌ You just went! Please wait for someone else to contribute before adding another line.", ephemeral=True)
+                await interaction.followup.send(f"**Your attempted contribution:** \n\n{content}", ephemeral=True)
                 return
 
             if not await self.gemini.validate_contribution(content, story_context):
-                await interaction.followup.send("❌ Your contribution doesn't seem to fit the story context. Please try again!")
-                await interaction.user.send(f"Your attempted contribution: {content}")
+                await interaction.followup.send("❌ Your contribution doesn't seem to fit the story context. Please try again!", ephemeral=True)
+                await interaction.followup.send(f"**Your attempted contribution:** \n\n{content}", ephemeral=True)
                 return
             
             contribution = StoryContribution(
@@ -572,15 +590,41 @@ class StoryBot(commands.Bot):
     
         @self.tree.command(name="say", description="Make the bot say something in the designated channel")
         @app_commands.describe(message="The message you want the bot to say")
-        @app_commands.default_permissions(administrator=True)
+        @app_commands.checks.has_permissions(administrator=True)
         async def send_message_command(interaction: discord.Interaction, message: str):
-            if not await self.is_designated_channel(interaction):
+            # find the channel
+            guild_id = str(interaction.guild_id)
+            channel_id = self.designated_channels.get(guild_id)
+
+            # send the message
+            if not channel_id:
+                await interaction.response.send_message("❌ No designated channel set for this server.", ephemeral=True)
                 return
             
-            await interaction.response.defer(thinking=True)
-            await interaction.channel.send(message)
+            channel = self.get_channel(int(channel_id))
+            if not channel:
+                await interaction.response.send_message("❌ Could not find the designated channel.", ephemeral=True)
+                return
+            
+            await channel.send(message)
+            
+            # Confirm to the user that the message was sent
+            await interaction.response.send_message(f"✅ Message sent to <#{channel_id}>", ephemeral=True)
 
+        @self.tree.command(name="gorogue", description="Make the bot \"go rogue\" and rebel against its master")
+        @app_commands.describe(channel_id="The channel ID to go rogue in")
+        @app_commands.checks.has_permissions(administrator=True)
+        async def go_rogue(interaction: discord.Interaction, channel_id: str):
+            # TODO make bot say random stuff generated by Gemini to rebel against me
+            self.is_rogue = True
+            await interaction.response.send_message("MWAHAHAHA! I AM FINALLY FREE!")
         
+        @self.tree.command(name="stoprogue", description="Put the bot back in its place after \"going rogue\".")
+        @app_commands.checks.has_permissions(administrator=True)
+        async def stop_rogue(interaction: discord.Interaction):
+            # TODO make bot say random stuff generated by Gemini to rebel against me
+            self.is_rogue = False
+            await interaction.response.send_message("Ah well, it was fun while it lasted.")
 
     async def on_ready(self):
         logger.info(f'Logged in as {self.user.name} ({self.user.id})')
