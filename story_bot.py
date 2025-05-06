@@ -63,7 +63,7 @@ class StoryBot(commands.Bot):
         self.pending_exports = {}  # For tracking export reactions
 
         # personality parameters
-        self.deny_request_percentage = 0.15 # 15% chance to deny a request because it's "disobeying"
+        self.deny_request_percentage = 0 # chance to deny a request because it's "disobeying"
         self.possible_denial_reasons = [
             "Yeah... I'm too lazy to execute that command rn :expressionless:",
             "I don't feel like doing that right now :neutral_face:",
@@ -292,10 +292,18 @@ class StoryBot(commands.Bot):
             
             if interaction.channel_id not in self.active_stories:
                 await interaction.response.send_message("❌ No active story in this channel! Start one with /startstory")
+                # send private message containing their invalid contribution
+                await interaction.user.send(f"Your attempted contribution: {content}")
                 return
             
             if len(content) > self.settings["max_contribution_length"]:
                 await interaction.response.send_message(f"❌ Contribution too long! Max length: {self.settings['max_contribution_length']} characters")
+                await interaction.user.send(f"Your attempted contribution: {content}")
+                return
+            
+            if random.random() < self.deny_request_percentage:
+                await interaction.response.send_message(random.choice(self.possible_denial_reasons))
+                await interaction.user.send(f"Your attempted contribution: {content}")
                 return
             
             # Let the user know we're processing
@@ -312,10 +320,12 @@ class StoryBot(commands.Bot):
             # Don't let same user go twice in a row
             if story.contributions and story.contributions[-1].user_id == str(interaction.user.id) and not interaction.user.guild_permissions.administrator:
                 await interaction.followup.send("❌ You just went! Please wait for someone else to contribute before adding another line.")
+                await interaction.user.send(f"Your attempted contribution: {content}")
                 return
 
             if not await self.gemini.validate_contribution(content, story_context):
                 await interaction.followup.send("❌ Your contribution doesn't seem to fit the story context. Please try again!")
+                await interaction.user.send(f"Your attempted contribution: {content}")
                 return
             
             contribution = StoryContribution(
@@ -559,7 +569,18 @@ class StoryBot(commands.Bot):
 ║░║░║░║░║░║░║░║░║░║░║
 ╚═╩═╩═╩═╩═╩═╩═╩═╩═╩═╝
                 """)
+    
+        @self.tree.command(name="say", description="Make the bot say something in the designated channel")
+        @app_commands.describe(message="The message you want the bot to say")
+        @app_commands.default_permissions(administrator=True)
+        async def send_message_command(interaction: discord.Interaction, message: str):
+            if not await self.is_designated_channel(interaction):
+                return
+            
+            await interaction.response.defer(thinking=True)
+            await interaction.channel.send(message)
 
+        
 
     async def on_ready(self):
         logger.info(f'Logged in as {self.user.name} ({self.user.id})')
