@@ -1,0 +1,9 @@
+{
+  "contribution_id": "int",
+  "story_id": "int",
+  "user_id": "string",
+  "username": "string",
+  "display_name": "string",
+  "content": "string",
+  "timestamp": "timestamp"
+}

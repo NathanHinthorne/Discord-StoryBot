@@ -1,0 +1,5 @@
+{
+    "rate_limit": 60,
+    "max_contribution_length": 350,
+    "narrator_intervention_frequency": 5
+}
