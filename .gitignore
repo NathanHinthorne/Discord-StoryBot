@@ -3,8 +3,8 @@
 *.csv
 
 # config files
-*.json
 *.env
+secrets
 
 # unnecessary folders
 __pycache__
