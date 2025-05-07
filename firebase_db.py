@@ -130,3 +130,33 @@ class FirebaseDatabase:
             return doc.to_dict().get('channel_id')
         return None
 
+    def get_guild_settings(self, guild_id):
+        """Get settings for a specific guild"""
+        doc = self.db.collection('settings').document(guild_id).get()
+        if doc.exists:
+            return doc.to_dict()
+        return self.get_default_settings()
+
+    def get_default_settings(self):
+        """Return default settings for a guild"""
+        return {
+            "rate_limit": 60,
+            "max_contribution_length": 350,
+            "designated_channel": None,
+            "is_rogue": False,
+            "rogue_channel": None,
+            "deny_request_percentage": 0.1,
+        }
+
+    def update_guild_settings(self, guild_id, settings):
+        """Update settings for a guild"""
+        self.db.collection('settings').document(guild_id).set(
+            settings, merge=True
+        )
+
+    def get_all_guild_settings(self):
+        """Get settings for all guilds"""
+        settings_ref = self.db.collection('settings').stream()
+        return {doc.id: doc.to_dict() for doc in settings_ref}
+
+

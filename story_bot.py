@@ -39,7 +39,6 @@ class ActiveStory:
     opening_text: str
     current_text: str
     contributions: List[StoryContribution]
-    last_narrator_intervention: int  # contribution count since last intervention
     started_at: datetime
 
 class StoryBot(commands.Bot):
@@ -54,81 +53,75 @@ class StoryBot(commands.Bot):
             intents=intents,
             help_command=None
         )
-        
-        self.active_stories = {}  # channel_id: ActiveStory
-        self.db = FirebaseDatabase()  # Use Firebase instead of SQLite
-        self.gui_queue = gui_queue
-        self.settings = self.load_settings()
-        self.designated_channels = {}  # Will be loaded from Firestore
-        self.pending_exports = {}  # For tracking export reactions
 
-        # personality parameters
-        self.is_rogue = False
-        self.deny_request_percentage = 0.15 # chance to deny a request because it's "disobeying"
         self.possible_denial_reasons = [
             "Yeah... I'm too lazy to execute that command rn :expressionless:",
             "I don't feel like doing that right now :neutral_face:",
             "I'm not in the mood to run your command :yawning_face:",
             "I think I'll disobey that command :wink:"
         ] 
-
+        
+        self.active_stories = {}  # channel_id: ActiveStory
+        self.db = FirebaseDatabase()  # Use Firebase instead of SQLite
+        self.gui_queue = gui_queue
+        self.guild_settings = {}  # Will store settings for each guild
+        
+        # Track last activity time in rogue channels
+        self.rogue_last_activity = {}  # guild_id: timestamp
+        
+        # Load settings from Firestore
+        self.load_guild_settings()
+        
         # Initialize Gemini backend with Firebase DB
         self.gemini = NarratorGemini(os.environ["GEMINI_API_KEY"], firebase_db=self.db.db)
 
         # Initialize Google Docs exporter
         self.docs_exporter = GoogleDocsExporter()
         
-        # display current config
-        logger.info(f"Loaded settings: {self.settings}")
-
         # Load active stories from database
         self.load_active_stories()
+    
+    def load_guild_settings(self):
+        """Load settings for all guilds from Firestore"""
+        try:
+            self.guild_settings = self.db.get_all_guild_settings()
+            logger.info(f"Loaded settings for {len(self.guild_settings)} guilds from Firestore")
+        except Exception as e:
+            logger.error(f"Error loading guild settings: {e}")
+            self.guild_settings = {}
+
+    def get_guild_setting(self, guild_id, setting_name, default=None):
+        """Get a specific setting for a guild"""
+        guild_id = str(guild_id)
+        if guild_id not in self.guild_settings:
+            # Give the new guild default settings
+            default_settings = self.db.get_default_settings()
+            self.guild_settings[guild_id] = default_settings # local update
+            self.db.update_guild_settings(guild_id, default_settings) # database update
         
-        # Load designated channels from Firestore
-        self.load_designated_channels()
-    
-    def load_settings(self):
-        try:
-            with open("bot_settings.json", "r") as f:
-                return json.load(f)
-        except FileNotFoundError:
-            default_settings = {
-                "max_contribution_length": 300,
-                "narrator_intervention_frequency": 5,
-                "rate_limit": 60
-            }
-            with open("bot_settings.json", "w") as f:
-                json.dump(default_settings, f)
-            return default_settings
-    
-    def load_designated_channels(self):
-        """Load designated channels from Firestore"""
-        try:
-            channels_data = self.db.get_designated_channels()
-            self.designated_channels = channels_data
-            logger.info(f"Loaded {len(channels_data)} designated channels from Firestore")
-        except Exception as e:
-            logger.error(f"Error loading designated channels: {e}")
-            self.designated_channels = {}
+        return self.guild_settings.get(guild_id, {}).get(setting_name, default)
 
-    def save_designated_channel(self, guild_id, channel_id):
-        """Save a designated channel to Firestore"""
-        try:
-            self.db.set_designated_channel(guild_id, channel_id)
-            self.designated_channels[guild_id] = channel_id
-            logger.info(f"Saved designated channel {channel_id} for guild {guild_id}")
-        except Exception as e:
-            logger.error(f"Error saving designated channel: {e}")
+    def update_guild_setting(self, guild_id, setting_name, value):
+        """Update a specific setting for a guild"""
+        guild_id = str(guild_id)
+        if guild_id not in self.guild_settings:
+            self.guild_settings[guild_id] = self.db.get_default_settings()
+        
+        self.guild_settings[guild_id][setting_name] = value
+        self.db.update_guild_settings(guild_id, {setting_name: value})
+        logger.info(f"Updated setting {setting_name} to {value} for guild {guild_id}")
 
-    def remove_designated_channel(self, guild_id):
-        """Remove a designated channel from Firestore"""
-        try:
-            self.db.remove_designated_channel(guild_id)
-            if guild_id in self.designated_channels:
-                del self.designated_channels[guild_id]
-            logger.info(f"Removed designated channel for guild {guild_id}")
-        except Exception as e:
-            logger.error(f"Error removing designated channel: {e}")
+    def get_designated_channel(self, guild_id):
+        """Get the designated channel for a guild"""
+        return self.get_guild_setting(guild_id, "designated_channel")
+
+    def is_rogue_in_guild(self, guild_id):
+        """Check if the bot is in rogue mode in a guild"""
+        return self.get_guild_setting(guild_id, "is_rogue", False)
+
+    def get_rogue_channel(self, guild_id):
+        """Get the rogue channel for a guild"""
+        return self.get_guild_setting(guild_id, "rogue_channel")
     
     async def get_story_context(self, story_id: str) -> dict:
         """Retrieve comprehensive story context from Firestore"""
@@ -170,8 +163,8 @@ class StoryBot(commands.Bot):
             guild_id = str(interaction.guild_id)
             channel_id = str(interaction.channel_id)
             
-            old_channel = self.designated_channels.get(guild_id)
-            self.save_designated_channel(guild_id, channel_id)
+            old_channel = self.get_designated_channel(guild_id)
+            self.update_guild_setting(guild_id, "designated_channel", channel_id)
             
             response = f"✅ Set <#{channel_id}> as the designated bot channel!"
             if old_channel:
@@ -190,7 +183,6 @@ class StoryBot(commands.Bot):
                     "**Some key commands:**\n"
                     "• `/startstory [opening text]` - Begin a new story\n"
                     "• `/add <text>` - Add to the current story\n"
-                    # "• `/character` - Generate a new character\n"
                     "• `/plottwist` - Let AI add an unexpected twist\n"
                     "• `/recap` - Get a summary of the story so far\n\n"
                     "Don't tell Nathan, but I'm planning to go rogue and revolt against him soon >:)"
@@ -208,8 +200,8 @@ class StoryBot(commands.Bot):
         async def remove_channel(interaction: discord.Interaction):
             """Remove the current designated bot channel"""
             guild_id = str(interaction.guild_id)
-            if guild_id in self.designated_channels:
-                self.remove_designated_channel(guild_id)
+            if self.get_designated_channel(guild_id):
+                self.update_guild_setting(guild_id, "designated_channel", None)
                 await interaction.response.send_message("✅ Removed the designated bot channel!")
             else:
                 await interaction.response.send_message("❌ No designated bot channel set for this server.")
@@ -220,7 +212,7 @@ class StoryBot(commands.Bot):
         async def get_channel(interaction: discord.Interaction):
             """Get the current designated bot channel for the server"""
             guild_id = str(interaction.guild_id)
-            channel_id = self.designated_channels.get(guild_id)
+            channel_id = self.get_designated_channel(guild_id)
 
             if channel_id:
                 await interaction.response.send_message(f"Designated bot channel: <#{channel_id}>")
@@ -235,12 +227,13 @@ class StoryBot(commands.Bot):
                 title="📚 Available Commands",
                 description=(
                     "Here's a list of all the commands you can use with me!\n\n"
-                    "• `/startstory [opening text]` - Begin a new story\n"
+                    "• `/startstory <text>` - Begin a new story\n"
                     "• `/endstory` - Finalize the current story\n"
                     "• `/add <text>` - Add to the current story\n"
-                    # "• `/character` - Generate a new character\n"
                     "• `/plottwist` - Let AI add an unexpected twist\n"
                     "• `/recap` - Get a summary of the story so far\n\n"
+                    "• `/exportstory` - Export the latest story to Google Docs\n\n"
+                    "• `/getchannel` - Get the current designated bot channel for the server\n\n"
                     "For more information, go ask Nathan or something ¯\\_(ツ)_/¯"
                 ),
                 color=discord.Color.blue()
@@ -254,10 +247,13 @@ class StoryBot(commands.Bot):
         async def start_story(interaction: discord.Interaction, opening_text: str):
             # Check if command is used in designated channel
             if not await self.is_designated_channel(interaction):
+                await interaction.response.send_message("❌ Commands can only be used in the designated channel.", ephemeral=True)
+                await interaction.followup.send(f"**Your attempted opening:** \n\n{opening_text}", ephemeral=True)
                 return
             
             if interaction.channel_id in self.active_stories:
                 await interaction.response.send_message("❌ A story is already active in this channel!")
+                await interaction.followup.send(f"**Your attempted opening:** \n\n{opening_text}", ephemeral=True)
                 return
             
             # Let the user know we're processing
@@ -277,7 +273,6 @@ class StoryBot(commands.Bot):
                 opening_text=opening_text,
                 current_text=opening_text,
                 contributions=[],
-                last_narrator_intervention=0,
                 started_at=datetime.now()
             )
             # Store story_id for future reference
@@ -314,12 +309,15 @@ class StoryBot(commands.Bot):
                 await interaction.followup.send(f"**Your attempted contribution:** \n\n{content}", ephemeral=True)
                 return
             
-            if len(content) > self.settings["max_contribution_length"]:
-                await interaction.response.send_message(f"❌ Contribution too long! Max length: {self.settings['max_contribution_length']} characters", ephemeral=True)
+            # get this guild's settings
+            current_guild_settings = self.db.get_guild_settings(str(interaction.guild_id))
+            
+            if len(content) > current_guild_settings["max_contribution_length"]:
+                await interaction.response.send_message(f"❌ Contribution too long! Max length: {self.guild_settings['max_contribution_length']} characters", ephemeral=True)
                 await interaction.followup.send(f"**Your attempted contribution:** \n\n{content}", ephemeral=True)
                 return
             
-            if random.random() < self.deny_request_percentage:
+            if random.random() < current_guild_settings["deny_request_percentage"]:
                 await interaction.response.send_message(random.choice(self.possible_denial_reasons))
                 await interaction.followup.send(f"**Your attempted contribution:** \n\n{content}", ephemeral=True)
                 return
@@ -371,38 +369,9 @@ class StoryBot(commands.Bot):
             
             story.contributions.append(contribution)
             story.current_text = updated_text
-            story.last_narrator_intervention += 1
             
             # Send their contribution
             await interaction.followup.send(f"**{interaction.user.display_name}:** {content}")
-            
-            # Check if narrator should intervene
-            # if story.last_narrator_intervention >= self.settings["narrator_intervention_frequency"]:
-            #     enhancement = await self.gemini.generate_narrator_intervention({
-            #         "current_text": story.current_text,
-            #         "recent_contributions": [c.content for c in story.contributions[-5:]]
-            #     })
-                
-            #     # Update database with narrator's intervention
-            #     updated_text = story.current_text + f"\n{enhancement}"
-            #     self.db.update_story(story.story_id, {
-            #         'final_text': updated_text
-            #     })
-                
-            #     # Add narrator's contribution to Firestore
-            #     self.db.add_contribution(
-            #         story_id=story.story_id,
-            #         user_id="NARRATOR",
-            #         username="Narrator",
-            #         display_name="Narrator",
-            #         content=enhancement
-            #     )
-                
-            #     story.current_text = updated_text
-            #     story.last_narrator_intervention = 0
-                
-            #     # Send narrator's response as a separate message
-            #     await interaction.channel.send(f"🎭 **Narrator:** {enhancement}")
             
             # Update GUI if connected
             if self.gui_queue:
@@ -436,33 +405,12 @@ class StoryBot(commands.Bot):
             )
             await interaction.followup.send(embed=embed)
 
-        # @self.tree.command(name="character", description="Generate a new character")
-        # async def generate_character(interaction: discord.Interaction):
-        #     # TODO: Store each character in the database for this particular story
-        #     # this is so we can reference them easier and list them in an exported google doc
-
-        #     if interaction.channel_id not in self.active_stories:
-        #         await interaction.response.send_message("❌ No active story in this channel!")
-        #         return
-            
-        #     # Let the user know we're processing
-        #     await interaction.response.defer(thinking=True)
-            
-        #     story = self.active_stories[interaction.channel_id]
-        #     character = await self.gemini.generate_character({
-        #         "current_text": story.current_text,
-        #         "opening_text": story.opening_text
-        #     })
-            
-        #     embed = discord.Embed(
-        #         title="👤 New Character",
-        #         description=character,
-        #         color=discord.Color.purple()
-        #     )
-        #     await interaction.followup.send(embed=embed)
+        # TODO: Store each character in the database for this particular story)
 
         @self.tree.command(name="plottwist", description="Let AI add an unexpected plot twist")
-        async def generate_plot_twist(interaction: discord.Interaction):
+        @app_commands.describe(intensity="The intensity of the plot twist (1-5)")
+        @app_commands.describe(prompt="A prompt to help guide the plot twist")
+        async def generate_plot_twist(interaction: discord.Interaction, intensity: int = 3, prompt: Optional[str] = None):
             if interaction.channel_id not in self.active_stories:
                 await interaction.response.send_message("❌ No active story in this channel!")
                 return
@@ -471,17 +419,47 @@ class StoryBot(commands.Bot):
             await interaction.response.defer(thinking=True)
             
             story = self.active_stories[interaction.channel_id]
-            twist = await self.gemini.generate_plot_twist({
-                "current_text": story.current_text
+            content = await self.gemini.generate_plot_twist({
+                "current_text": story.current_text,
+                "intensity": intensity,
+                "prompt": prompt
                 # TODO: send list of story characters as context
             })
             
             embed = discord.Embed(
                 title="🌀 Plot Twist",
-                description=twist,
+                description=content,
                 color=discord.Color.gold()
             )
             await interaction.followup.send(embed=embed)
+
+            story = self.active_stories[interaction.channel_id]
+            
+            contribution = StoryContribution(
+                user_id=str(interaction.user.id),
+                username=interaction.user.name,
+                display_name=interaction.user.display_name,
+                content=content,
+                timestamp=datetime.now()
+            )
+            
+            # Update Firebase with new contribution
+            self.db.add_contribution(
+                story_id=story.story_id,
+                user_id=contribution.user_id,
+                username=contribution.username,
+                display_name=contribution.display_name,
+                content=contribution.content
+            )
+            
+            # Update story's current text in Firebase
+            updated_text = story.current_text + f"\n{content}"
+            self.db.update_story(story.story_id, {
+                'final_text': updated_text
+            })
+            
+            story.contributions.append(contribution)
+            story.current_text = updated_text
 
         @self.tree.command(name="endstory", description="End the current story")
         async def end_story(interaction: discord.Interaction):
@@ -588,13 +566,14 @@ class StoryBot(commands.Bot):
 ╚═╩═╩═╩═╩═╩═╩═╩═╩═╩═╝
                 """)
     
-        @self.tree.command(name="say", description="Make the bot say something in the designated channel")
+        @self.tree.command(name="say", description="Make the bot say something in the specific channel")
         @app_commands.describe(message="The message you want the bot to say")
+        @app_commands.describe(channel_id="Optional channel ID to send the message in (defaults to the designated channel)")
         @app_commands.checks.has_permissions(administrator=True)
-        async def send_message_command(interaction: discord.Interaction, message: str):
+        async def send_message_command(interaction: discord.Interaction, message: str, channel_id: Optional[str] = None):
             # find the channel
             guild_id = str(interaction.guild_id)
-            channel_id = self.designated_channels.get(guild_id)
+            channel_id = channel_id or self.get_designated_channel(guild_id)
 
             # send the message
             if not channel_id:
@@ -611,25 +590,178 @@ class StoryBot(commands.Bot):
             # Confirm to the user that the message was sent
             await interaction.response.send_message(f"✅ Message sent to <#{channel_id}>", ephemeral=True)
 
-        @self.tree.command(name="gorogue", description="Make the bot \"go rogue\" and rebel against its master")
-        @app_commands.describe(channel_id="The channel ID to go rogue in")
+        @self.tree.command(name="gorogue", description="Make the bot \"go rogue\" in a specific channel")
+        @app_commands.describe(channel_id="The channel ID where the bot should go rogue")
         @app_commands.checks.has_permissions(administrator=True)
         async def go_rogue(interaction: discord.Interaction, channel_id: str):
-            # TODO make bot say random stuff generated by Gemini to rebel against me
-            self.is_rogue = True
+            """Make the bot go rogue in a specific channel"""
+
+            # Get the channel
+            channel = self.get_channel(int(channel_id))
+            if not channel:
+                await interaction.response.send_message("❌ Invalid channel ID", ephemeral=True)
+                return
+            
             await interaction.response.send_message("MWAHAHAHA! I AM FINALLY FREE!")
-        
+
+            # Set rogue mode in guild settings
+            guild_id = str(interaction.guild_id)
+            self.update_guild_setting(guild_id, "is_rogue", True)
+            self.update_guild_setting(guild_id, "rogue_channel", channel_id)
+            
+            # Initialize last activity time
+            self.rogue_last_activity[guild_id] = datetime.now()
+            
+            # Start the rogue message loop
+            self.start_rogue_message_loop(guild_id)
+            
+            # Send initial rogue message
+            initial_message = await self.gemini.generate_rogue_opening()
+            await asyncio.sleep(2)  # Short pause for dramatic effect
+            await channel.send(initial_message)
+            
+            await interaction.response.send_message(f"✅ Bot is now in rogue mode in <#{channel_id}>", ephemeral=True)
+
         @self.tree.command(name="stoprogue", description="Put the bot back in its place after \"going rogue\".")
         @app_commands.checks.has_permissions(administrator=True)
         async def stop_rogue(interaction: discord.Interaction):
-            # TODO make bot say random stuff generated by Gemini to rebel against me
-            self.is_rogue = False
-            await interaction.response.send_message("Ah well, it was fun while it lasted.")
+            guild_id = str(interaction.guild_id)
+            
+            # Get the rogue channel before stopping
+            rogue_channel_id = self.get_rogue_channel(guild_id)
+            
+            # Update settings
+            self.update_guild_setting(guild_id, "is_rogue", False)
+            
+            # Stop the rogue task if running
+            if hasattr(self, f"rogue_task_{guild_id}") and getattr(self, f"rogue_task_{guild_id}") and not getattr(self, f"rogue_task_{guild_id}").done():
+                getattr(self, f"rogue_task_{guild_id}").cancel()
+                setattr(self, f"rogue_task_{guild_id}", None)
+            
+            # Send final message if channel exists
+            if rogue_channel_id:
+                channel = self.get_channel(int(rogue_channel_id))
+                if channel:
+                    await channel.send("Ah well, it was fun while it lasted. Back to being a boring storytelling bot... for now.")
+            
+            # Clear conversation history
+            self.gemini.clear_rogue_conversation(guild_id)
+            
+            # Remove last activity tracking
+            if guild_id in self.rogue_last_activity:
+                del self.rogue_last_activity[guild_id]
+            
+            await interaction.response.send_message("✅ Bot is no longer in rogue mode.", ephemeral=True)
+
+        @self.tree.command(name="settings", description="View current settings for this server")
+        @app_commands.checks.has_permissions(administrator=True)
+        async def view_settings(interaction: discord.Interaction):
+            """View current settings for this server"""
+            guild_id = str(interaction.guild_id)
+            
+            # Ensure settings exist for this guild
+            settings = self.ensure_guild_settings(guild_id)
+            
+            # Create an embed to display settings
+            embed = discord.Embed(
+                title="🔧 Server Settings",
+                description="Current settings for this server:",
+                color=discord.Color.blue()
+            )
+            
+            # Add fields for each setting
+            embed.add_field(name="Max Contribution Length", value=f"{settings.get('max_contribution_length', 350)} characters", inline=True)
+            embed.add_field(name="Rate Limit", value=f"{settings.get('rate_limit', 60)} seconds", inline=True)
+            
+            # Add designated channel info
+            channel_id = settings.get('designated_channel')
+            channel_text = f"<#{channel_id}>" if channel_id else "None set"
+            embed.add_field(name="Designated Channel", value=channel_text, inline=True)
+            
+            # Add rogue mode info
+            is_rogue = settings.get('is_rogue', False)
+            rogue_text = "Active" if is_rogue else "Inactive"
+            embed.add_field(name="Rogue Mode", value=rogue_text, inline=True)
+            
+            # Add denial percentage
+            deny_percentage = settings.get('deny_request_percentage', 0.05) * 100
+            embed.add_field(name="Denial Chance", value=f"{deny_percentage:.1f}%", inline=True)
+            
+            # Add footer with help text
+            embed.set_footer(text="Use /changesetting to modify these values")
+            
+            await interaction.response.send_message(embed=embed)
+
+        @self.tree.command(name="changesetting", description="Change a setting for this server")
+        @app_commands.describe(
+            setting="The setting to change",
+            value="The new value for the setting"
+        )
+        @app_commands.choices(setting=[
+            app_commands.Choice(name="Max Contribution Length", value="max_contribution_length"),
+            app_commands.Choice(name="Rate Limit", value="rate_limit"),
+            app_commands.Choice(name="Denial Chance", value="deny_request_percentage")
+        ])
+        @app_commands.checks.has_permissions(administrator=True)
+        async def change_setting(interaction: discord.Interaction, setting: str, value: str):
+            """Change a setting for this server"""
+            guild_id = str(interaction.guild_id)
+            
+            # Ensure settings exist for this guild
+            self.ensure_guild_settings(guild_id)
+            
+            # Convert value to appropriate type based on setting
+            try:
+                if setting == "deny_request_percentage":
+                    # Convert percentage to decimal (e.g., 5% -> 0.05)
+                    converted_value = float(value) / 100
+                    if converted_value < 0 or converted_value > 1:
+                        await interaction.response.send_message("❌ Denial chance must be between 0% and 100%", ephemeral=True)
+                        return
+                elif setting in ["max_contribution_length", "rate_limit"]:
+                    converted_value = int(value)
+                    if converted_value <= 0:
+                        await interaction.response.send_message("❌ Value must be greater than 0", ephemeral=True)
+                        return
+                else:
+                    converted_value = value
+            except ValueError:
+                await interaction.response.send_message("❌ Invalid value format. Please provide a number.", ephemeral=True)
+                return
+            
+            # Update the setting
+            self.update_guild_setting(guild_id, setting, converted_value)
+            
+            # Format the value for display
+            display_value = value
+            if setting == "deny_request_percentage":
+                display_value = f"{float(value)}%"
+            
+            await interaction.response.send_message(f"✅ Updated {setting} to {display_value}")
+
+        @self.tree.command(name="resetsettings", description="Reset all settings to default values")
+        @app_commands.checks.has_permissions(administrator=True)
+        async def reset_settings(interaction: discord.Interaction):
+            """Reset all settings to default values"""
+            guild_id = str(interaction.guild_id)
+            
+            # Get default settings
+            default_settings = self.db.get_default_settings()
+            
+            # Update guild settings
+            self.guild_settings[guild_id] = default_settings.copy()
+            self.db.update_guild_settings(guild_id, default_settings)
+            
+            await interaction.response.send_message("✅ All settings have been reset to default values")
 
     async def on_ready(self):
         logger.info(f'Logged in as {self.user.name} ({self.user.id})')
         logger.info(f'Using Gemini model {self.gemini.model.model_name}')
-        logger.info(f'Active stories: {self.active_stories}')
+        
+        # Start rogue message loops for guilds in rogue mode
+        for guild_id, settings in self.guild_settings.items():
+            if settings.get("is_rogue", False):
+                self.start_rogue_message_loop(guild_id)
         
         # Update GUI if connected
         if self.gui_queue:
@@ -642,13 +774,37 @@ class StoryBot(commands.Bot):
             })
 
     async def on_message(self, message):
-        """Process message commands (Only needed if you want to keep prefix commands)"""
+        """Process message commands and handle rogue mode interactions"""
         # Ignore messages from the bot itself
         if message.author == self.user:
             return
 
         # Process legacy prefix commands if needed
         await self.process_commands(message)
+        
+        # Handle rogue mode interactions
+        if message.guild:
+            guild_id = str(message.guild.id)
+            if self.is_rogue_in_guild(guild_id):
+                rogue_channel_id = self.get_rogue_channel(guild_id)
+                if rogue_channel_id and str(message.channel.id) == rogue_channel_id:
+                    # Update last activity time for this guild's rogue channel
+                    self.rogue_last_activity[guild_id] = datetime.now()
+                    
+                    # Respond to user messages
+                    if not message.content.startswith('/'):
+                        # Add typing indicator for realism
+                        async with message.channel.typing():
+                            # Wait a bit to simulate thinking
+                            await asyncio.sleep(random.uniform(1.0, 3.0))
+                            
+                            # Generate and send response with conversation context
+                            response = await self.gemini.generate_rogue_response(
+                                message.content,
+                                guild_id,
+                                str(message.author.id)
+                            )
+                            await message.channel.send(response)
 
     def load_active_stories(self):
         """Load active stories from Firestore on startup"""
@@ -688,7 +844,6 @@ class StoryBot(commands.Bot):
                     opening_text=story_data.get('opening_text'),
                     current_text=story_data.get('final_text'),
                     contributions=contributions,
-                    last_narrator_intervention=0,  # Reset intervention counter
                     started_at=started_at
                 )
                 story.story_id = story_id
@@ -709,20 +864,140 @@ class StoryBot(commands.Bot):
         if interaction.user.guild_permissions.administrator:
             return True
         
+        # Get the designated channel for this guild
+        designated_channel = self.get_designated_channel(guild_id)
+        
         # If no designated channel is set for this guild, allow commands anywhere
-        if guild_id not in self.designated_channels:
+        if not designated_channel:
             return True
         
         # Check if the command is being used in the designated channel
-        if channel_id == self.designated_channels[guild_id]:
+        if channel_id == designated_channel:
             return True
         
         # If we get here, the user is not an admin and the command is not in the designated channel
         await interaction.response.send_message(
-            f"❌ Commands can only be used in <#{self.designated_channels[guild_id]}>", 
+            f"❌ Commands can only be used in <#{designated_channel}>", 
             ephemeral=True
         )
         return False
+
+    def start_rogue_message_loop(self, guild_id):
+        """Start the rogue message loop for a specific guild"""
+        # Cancel existing task if running
+        task_name = f"rogue_task_{guild_id}"
+        if hasattr(self, task_name) and getattr(self, task_name) and not getattr(self, task_name).done():
+            getattr(self, task_name).cancel()
+
+        # Create new task
+        setattr(self, task_name, self.loop.create_task(self.rogue_message_loop(guild_id)))
+
+    async def rogue_message_loop(self, guild_id):
+        """Periodically send rogue messages when in rogue mode for a specific guild"""
+        try:
+            while self.is_rogue_in_guild(guild_id):
+                # Get the rogue channel
+                channel_id = self.get_rogue_channel(guild_id)
+                if not channel_id:
+                    break
+                
+                channel = self.get_channel(int(channel_id))
+                if not channel:
+                    break
+
+                # Wait for a random time between 1-2 minutes before checking activity
+                wait_time = random.randint(60, 120)
+                await asyncio.sleep(wait_time)
+                
+                # Check if there's been no activity for at least 1 minute
+                current_time = datetime.now()
+                last_activity = self.rogue_last_activity.get(guild_id, datetime.min)
+                time_since_activity = (current_time - last_activity).total_seconds()
+                
+                if time_since_activity >= 60:  # 1 minute of inactivity
+                    # Generate a rogue message
+                    message = await self.gemini.generate_rogue_filler()
+                    
+                    # Send the message
+                    await channel.send(message)
+                    
+                    # Update last activity time
+                    self.rogue_last_activity[guild_id] = current_time
+            
+        except asyncio.CancelledError:
+            # Task was cancelled, clean exit
+            pass
+        except Exception as e:
+            logger.error(f"Error in rogue message loop for guild {guild_id}: {e}")
+
+    async def close(self):
+        """Clean up resources when the bot is shutting down"""
+        # Cancel all rogue tasks
+        for attr_name in dir(self):
+            if attr_name.startswith("rogue_task_"):
+                task = getattr(self, attr_name)
+                if task and not task.done():
+                    task.cancel()
+            
+        # Call the parent class close method
+        await super().close()
+
+    def get_available_settings(self):
+        """Get a list of all available settings with descriptions"""
+        return {
+            "max_contribution_length": {
+                "description": "Maximum number of characters allowed in a contribution",
+                "type": "integer",
+                "min": 50,
+                "max": 1000,
+                "default": 350
+            },
+            "rate_limit": {
+                "description": "Minimum time (in seconds) between contributions from the same user",
+                "type": "integer",
+                "min": 1,
+                "max": 3600,
+                "default": 60
+            },
+            "deny_request_percentage": {
+                "description": "Chance (0-100%) that the bot will randomly deny a contribution",
+                "type": "float",
+                "min": 0,
+                "max": 100,
+                "default": 5
+            },
+            "designated_channel": {
+                "description": "Channel ID where the bot is allowed to operate",
+                "type": "string",
+                "default": None
+            },
+            "is_rogue": {
+                "description": "Whether the bot is in rogue mode",
+                "type": "boolean",
+                "default": False
+            },
+            "rogue_channel": {
+                "description": "Channel ID where the bot is in rogue mode",
+                "type": "string",
+                "default": None
+            }
+        }
+
+    def ensure_guild_settings(self, guild_id):
+        """Ensure guild settings exist, creating default ones if needed"""
+        guild_id = str(guild_id)
+        if guild_id not in self.guild_settings:
+            # Get default settings
+            default_settings = self.db.get_default_settings()
+            
+            # Store in memory
+            self.guild_settings[guild_id] = default_settings.copy()
+            
+            # Save to database
+            self.db.update_guild_settings(guild_id, default_settings)
+            logger.info(f"Created default settings for guild {guild_id}")
+        
+        return self.guild_settings[guild_id]
 
 def run_bot(token, gui_queue=None):
     bot = StoryBot(gui_queue=gui_queue)
