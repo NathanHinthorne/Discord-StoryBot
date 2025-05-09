@@ -144,7 +144,7 @@ class StoryBot(commands.Bot):
         await self.add_commands_to_tree()
 
         # For development - sync to specific test guild
-        test_guild = discord.Object(id='1036475105393524736')
+        test_guild = discord.Object(id='1063658763225137212')
         await self.tree.sync(guild=test_guild)  # Fast, immediate sync
 
         # For production - sync globally (slow)
@@ -231,8 +231,8 @@ class StoryBot(commands.Bot):
                     "• `/endstory` - Finalize the current story\n"
                     "• `/add <text>` - Add to the current story\n"
                     "• `/plottwist` - Let AI add an unexpected twist\n"
-                    "• `/recap` - Get a summary of the story so far\n\n"
-                    "• `/exportstory` - Export the latest story to Google Docs\n\n"
+                    "• `/recap` - Get a summary of the story so far\n"
+                    "• `/exportstory` - Export the latest story to Google Docs\n"
                     "• `/getchannel` - Get the current designated bot channel for the server\n\n"
                     "For more information, go ask Nathan or something ¯\\_(ツ)_/¯"
                 ),
