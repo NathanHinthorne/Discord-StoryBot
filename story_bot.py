@@ -280,6 +280,24 @@ class StoryBot(commands.Bot):
             
             self.active_stories[interaction.channel_id] = story
 
+            # create new contribution for opening text
+            contribution = StoryContribution(
+                user_id=str(interaction.user.id),
+                username=interaction.user.name,
+                display_name=interaction.user.display_name,
+                content=opening_text,
+                timestamp=datetime.now()
+            )
+
+            # Update Firebase with new contribution
+            self.db.add_contribution(
+                story_id=story_id,
+                user_id=contribution.user_id,
+                username=contribution.username,
+                display_name=contribution.display_name,
+                content=contribution.content
+            )
+
             # story_starters = [
             #     "Once upon a time...",
             #     "In a galaxy far, far away...",
@@ -344,6 +362,7 @@ class StoryBot(commands.Bot):
                 await interaction.followup.send(f"**Your attempted contribution:** \n\n{content}", ephemeral=True)
                 return
             
+            # create new contribution
             contribution = StoryContribution(
                 user_id=str(interaction.user.id),
                 username=interaction.user.name,
@@ -362,7 +381,7 @@ class StoryBot(commands.Bot):
             )
             
             # Update story's current text in Firebase
-            updated_text = story.current_text + f"\n{content}"
+            updated_text = story.current_text + f"\n\n{content}"
             self.db.update_story(story.story_id, {
                 'final_text': updated_text
             })
@@ -453,7 +472,7 @@ class StoryBot(commands.Bot):
             )
             
             # Update story's current text in Firebase
-            updated_text = story.current_text + f"\n{content}"
+            updated_text = story.current_text + f"\n\n{content}"
             self.db.update_story(story.story_id, {
                 'final_text': updated_text
             })
@@ -513,11 +532,19 @@ class StoryBot(commands.Bot):
             self.pending_exports[export_msg.id] = story.story_id
 
         @self.tree.command(name="exportstory", description="Export the latest story to Google Docs")
-        async def export_story(interaction: discord.Interaction, story_id: Optional[str] = None):
+        @app_commands.describe(story_title="The title you want to give the story (max 100 characters)")
+        @app_commands.describe(story_id="The ID of the story you want to export (leave blank for the latest story in this channel)")
+        @app_commands.checks.has_permissions(administrator=True)
+        async def export_story(interaction: discord.Interaction, story_title: str, story_id: Optional[str] = None):
             """Export a story to Google Docs"""
             if not self.docs_exporter or not self.docs_exporter.is_available():
                 await interaction.response.send_message("❌ Google Docs export is not available. Please ask the bot administrator to set up the Google API credentials.")
                 return
+            
+            # only export finished stories
+            # if interaction.channel_id in self.active_stories:
+            #     await interaction.response.send_message("❌ You cannot export an active story. Please end the story first with /endstory.")
+            #     return
             
             await interaction.response.defer(thinking=True)
             
@@ -541,9 +568,16 @@ class StoryBot(commands.Bot):
             contributions_list = [v for v in contributions.values()]
             
             # Check if the story already has a Google Doc URL
-            if story.get('doc_url'):
-                await interaction.followup.send(f"This story has already been exported to Google Docs: {story['doc_url']}")
+            # if story.get('doc_url'):
+            #     await interaction.followup.send(f"This story has already been exported to Google Docs: {story['doc_url']}")
+            #     return
+            
+            # set story title
+            if len(story_title) > 100:
+                await interaction.channel.send("❌ Title too long. Please try again.")
                 return
+            story['title'] = story_title
+            self.db.update_story(story_id, {'title': story['title']})
             
             # Export to Google Docs
             success, result = await self.docs_exporter.export_story_to_doc(story, contributions_list)
