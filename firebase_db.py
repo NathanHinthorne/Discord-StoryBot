@@ -95,12 +95,25 @@ class FirebaseDatabase:
     
     def get_recent_stories(self, channel_id, limit=5):
         """Get recent stories for a channel"""
-        stories = self.db.collection('stories')\
-                      .where('channel_id', '==', str(channel_id))\
-                      .order_by('started_at', direction=firestore.Query.DESCENDING)\
-                      .limit(limit)\
-                      .stream()
-        return {doc.id: doc.to_dict() for doc in stories}
+        try:
+            stories = self.db.collection('stories')\
+                          .where('channel_id', '==', str(channel_id))\
+                          .order_by('started_at', direction=firestore.Query.DESCENDING)\
+                          .limit(limit)\
+                          .stream()
+            return {doc.id: doc.to_dict() for doc in stories}
+        except Exception as e:
+            logger.error(f"Error getting recent stories: {e}")
+            # Fallback to unordered query if index doesn't exist
+            try:
+                stories = self.db.collection('stories')\
+                              .where('channel_id', '==', str(channel_id))\
+                              .limit(limit)\
+                              .stream()
+                return {doc.id: doc.to_dict() for doc in stories}
+            except Exception as fallback_error:
+                logger.error(f"Fallback query failed: {fallback_error}")
+                return {}
 
     # Designated channel operations
     def get_designated_channels(self):
@@ -158,5 +171,6 @@ class FirebaseDatabase:
         """Get settings for all guilds"""
         settings_ref = self.db.collection('settings').stream()
         return {doc.id: doc.to_dict() for doc in settings_ref}
+
 
 
