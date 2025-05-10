@@ -542,9 +542,9 @@ class StoryBot(commands.Bot):
                 return
             
             # only export finished stories
-            # if interaction.channel_id in self.active_stories:
-            #     await interaction.response.send_message("❌ You cannot export an active story. Please end the story first with /endstory.")
-            #     return
+            if interaction.channel_id in self.active_stories:
+                await interaction.response.send_message("❌ You cannot export an active story. Please end the story first with /endstory.")
+                return
             
             await interaction.response.defer(thinking=True)
             
@@ -568,9 +568,9 @@ class StoryBot(commands.Bot):
             contributions_list = [v for v in contributions.values()]
             
             # Check if the story already has a Google Doc URL
-            # if story.get('doc_url'):
-            #     await interaction.followup.send(f"This story has already been exported to Google Docs: {story['doc_url']}")
-            #     return
+            if story.get('doc_url'):
+                await interaction.followup.send(f"This story has already been exported to Google Docs: {story['doc_url']}")
+                return
             
             # set story title
             if len(story_title) > 100:
