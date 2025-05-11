@@ -1,5 +1,7 @@
 import random
 import discord
+from discord import app_commands, SelectOption
+from discord.ui import Select, View
 from discord.ext import commands
 import asyncio
 from datetime import datetime
@@ -8,7 +10,6 @@ from dataclasses import dataclass
 from typing import Optional, List
 import json
 import logging
-from discord import app_commands
 import os
 from dotenv import load_dotenv
 
@@ -244,7 +245,8 @@ class StoryBot(commands.Bot):
         # Storytelling commands
         @self.tree.command(name="startstory", description="Begin a new story")
         @app_commands.describe(opening_text="An opening for the story. Around 30-100 words would be nice.")
-        async def start_story(interaction: discord.Interaction, opening_text: str):
+        @app_commands.describe(title="The title of the story (max 100 characters)")
+        async def start_story(interaction: discord.Interaction, opening_text: str, title: Optional[str] = None):
             # Check if command is used in designated channel
             if not await self.is_designated_channel(interaction):
                 await interaction.response.send_message("❌ Commands can only be used in the designated channel.", ephemeral=True)
@@ -259,8 +261,10 @@ class StoryBot(commands.Bot):
             # Let the user know we're processing
             await interaction.response.defer(thinking=True)
             
+            title = title[:100] or "Untitled Story"
+            logger.info(f"Starting new story in channel {interaction.channel_id} with title '{title}' and opening text '{opening_text}'")
+
             # Create new story in Firebase
-            title = f"Story-{datetime.now().strftime('%Y%m%d-%H%M')}"
             story_id = self.db.create_story(
                 channel_id=str(interaction.channel_id),
                 title=title,
@@ -530,12 +534,51 @@ class StoryBot(commands.Bot):
             
             # Store the message ID and story ID in pending_exports for reaction handling
             self.pending_exports[export_msg.id] = story.story_id
+        
+        @self.tree.command(name="renamestory", description="Change the title of a story")
+        @app_commands.checks.has_permissions(administrator=True)
+        async def rename_story(interaction: discord.Interaction):
+            """Rename a story"""
+
+            # show list of recent stories for user to pick from
+            recent_stories = self.db.get_recent_stories(str(interaction.channel_id), 5)
+            if not recent_stories:
+                await interaction.response.send_message("❌ No stories found for this channel.")
+                return
+            
+            # Create a list of story titles and IDs
+            story_options = [(story['title'], story_id) for story_id, story in recent_stories.items()]
+            
+            # Create a dropdown menu for the user to select a story
+            story_select = Select(
+                placeholder="Select a story to rename",
+                options=[
+                    SelectOption(label=title, value=story_id) for title, story_id in story_options
+                ]
+            )
+
+            async def on_story_select(interaction: discord.Interaction):
+                selected_story_id = story_select.values[0]
+                
+                # Get the new title from the user
+                new_title = await self.bot.wait_for('message', check=lambda m: m.author == interaction.user and m.channel == interaction.channel)
+                story_title = new_title.content[:100] # truncate to 100 characters
+                            
+                await interaction.response.defer(thinking=True)
+                
+                # Update the story title
+                self.db.update_story(selected_story_id, {'title': story_title})
+                
+                await interaction.followup.send(f"✅ Story renamed to '{story_title}'")
+
+            story_select.callback = on_story_select
+
+            await interaction.response.send_message("Please select a story to rename:", view=View().add_item(story_select))
 
         @self.tree.command(name="exportstory", description="Export the latest story to Google Docs")
         @app_commands.describe(story_title="The title you want to give the story (max 100 characters)")
-        @app_commands.describe(story_id="The ID of the story you want to export (leave blank for the latest story in this channel)")
         @app_commands.checks.has_permissions(administrator=True)
-        async def export_story(interaction: discord.Interaction, story_title: str, story_id: Optional[str] = None):
+        async def export_story(interaction: discord.Interaction, story_title: str):
             """Export a story to Google Docs"""
             if not self.docs_exporter or not self.docs_exporter.is_available():
                 await interaction.response.send_message("❌ Google Docs export is not available. Please ask the bot administrator to set up the Google API credentials.")
@@ -548,14 +591,12 @@ class StoryBot(commands.Bot):
             
             await interaction.response.defer(thinking=True)
             
-            # If no story_id provided, try to get the most recent story for this channel
-            if not story_id:
-                recent_stories = self.db.get_recent_stories(str(interaction.channel_id), 1)
-                if recent_stories:
-                    story_id = list(recent_stories.keys())[0]
-                else:
-                    await interaction.followup.send("❌ No completed stories found for this channel.")
-                    return
+            recent_stories = self.db.get_recent_stories(str(interaction.channel_id), 1)
+            if recent_stories:
+                story_id = list(recent_stories.keys())[0]
+            else:
+                await interaction.followup.send("❌ No completed stories found for this channel.")
+                return
             
             # Get story data
             story = self.db.get_story(story_id)
