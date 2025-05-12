@@ -1,6 +1,6 @@
 import firebase_admin
 from firebase_admin import credentials, firestore
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import logging
 import os
@@ -13,6 +13,9 @@ logger = logging.getLogger('firebase_db')
 class FirebaseDatabase:
     def __init__(self):
         load_dotenv()
+
+        # self.db = firestore.client()
+
         
         # Parse JSON string from environment variable
         # This approach avoids the need to write the credentials to a file
@@ -27,24 +30,22 @@ class FirebaseDatabase:
             logger.error(f"Error initializing Firestore: {e}")
             raise e
     
-    def setup_database(self):
-        # No schema setup needed for Firestore
-        pass
-    
     # Story operations
-    def create_story(self, channel_id, title, opening_text):
+    def create_story(self, channel_id, title, opening_text, guild_id):
         """Create a new story and return its ID"""
         story_ref = self.db.collection('stories').document()
         story_id = story_ref.id
         
         story_data = {
             'channel_id': str(channel_id),
+            'guild_id': str(guild_id),
             'title': title,
             'opening_text': opening_text,
             'final_text': opening_text,
             'started_at': datetime.now(),
             'ended_at': None,
-            'doc_url': None
+            'doc_url': None,
+            'contribution_count': 1  # Start with 1 for the opening
         }
         
         story_ref.set(story_data)
@@ -159,6 +160,13 @@ class FirebaseDatabase:
             "is_rogue": False,
             "rogue_channel": None,
             "deny_request_percentage": 0.1,
+            "premium": False,
+            # Free tier limitations
+            "max_story_contributions": 100,  # Max contributions before auto-ending
+            "max_stored_stories": 5,         # Max stories stored before auto-purging
+            "plottwist_daily_limit": 5,      # Daily limit for plot twists
+            "recap_daily_limit": 5,          # Daily limit for recaps
+            "story_expiry_days": 30          # Days before stories are auto-purged
         }
 
     def update_guild_settings(self, guild_id, settings):
@@ -172,5 +180,68 @@ class FirebaseDatabase:
         settings_ref = self.db.collection('settings').stream()
         return {doc.id: doc.to_dict() for doc in settings_ref}
 
+    def is_premium_guild(self, guild_id):
+        """Check if a guild has premium status"""
+        return True # For testing
+        # doc = self.db.collection('premium_guilds').document(guild_id).get()
+        # return doc.exists
+
+    def get_command_usage(self, guild_id, command_name, period="daily"):
+        """Get usage count for a specific command in a guild"""
+        today = datetime.now().strftime("%Y-%m-%d")
+        doc = self.db.collection('command_usage').document(f"{guild_id}_{command_name}_{today}").get()
+        if doc.exists:
+            return doc.to_dict().get('count', 0)
+        return 0
+
+    def increment_command_usage(self, guild_id, command_name):
+        """Increment usage count for a specific command in a guild"""
+        today = datetime.now().strftime("%Y-%m-%d")
+        doc_ref = self.db.collection('command_usage').document(f"{guild_id}_{command_name}_{today}")
+        
+        # Use transactions to safely increment the counter
+        @firestore.transactional
+        def update_in_transaction(transaction, doc_ref):
+            doc = doc_ref.get(transaction=transaction)
+            if doc.exists:
+                count = doc.to_dict().get('count', 0) + 1
+                transaction.update(doc_ref, {'count': count})
+            else:
+                transaction.set(doc_ref, {'count': 1, 'date': today})
+        
+        transaction = self.db.transaction()
+        update_in_transaction(transaction, doc_ref)
+        
+        # Return the new count
+        return self.get_command_usage(guild_id, command_name)
+
+    def get_story_count(self, guild_id):
+        """Get count of stored stories for a guild"""
+        stories = self.db.collection('stories')\
+                    .where('guild_id', '==', str(guild_id))\
+                    .stream()
+        return len(list(stories))
+
+    def purge_old_stories(self, guild_id, days_to_keep=30):
+        """Purge stories older than specified days for non-premium guilds"""
+        cutoff_date = datetime.now() - timedelta(days=days_to_keep)
+        
+        # Get stories older than cutoff date
+        old_stories = self.db.collection('stories')\
+                        .where('guild_id', '==', str(guild_id))\
+                        .where('ended_at', '<', cutoff_date)\
+                        .stream()
+        
+        # Delete each story and its contributions
+        for story in old_stories:
+            story_id = story.id
+            # Delete contributions
+            contributions = self.db.collection('contributions')\
+                            .where('story_id', '==', story_id)\
+                            .stream()
+            for contrib in contributions:
+                contrib.reference.delete()
+            # Delete story
+            story.reference.delete()
 
 
