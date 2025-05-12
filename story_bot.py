@@ -390,11 +390,21 @@ class StoryBot(commands.Bot):
                 
                 # Add this contribution, then end the story
                 # Rest of the add_story implementation...
-                # [existing code for adding contribution]
+                
                 
                 # Auto-end the story
                 await self.end_story_internal(interaction.channel_id)
                 return
+            
+            # Warning when approaching the limit (5 or fewer contributions remaining)
+            if not is_premium and (max_contributions - contribution_count) <= 5:
+                remaining = max_contributions - contribution_count
+                await interaction.followup.send(
+                    f"⚠️ Warning: Only {remaining} more contribution{'s' if remaining != 1 else ''} left before this story reaches the free tier limit. "
+                    "The story will automatically end when the limit is reached. "
+                    "Upgrade to premium for unlimited story length!",
+                    ephemeral=False  # Make this visible to all users
+                )
             
             # Get story context for validation
             story_context = {
