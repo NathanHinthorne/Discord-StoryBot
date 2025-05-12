@@ -1,0 +1,9 @@
+{
+  "story_id": "int",
+  "channel_id": "string",
+  "title": "string",
+  "opening_text": "string",
+  "final_text": "string",
+  "started_at": "timestamp",
+  "ended_at": "timestamp"
+}

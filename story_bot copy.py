@@ -261,25 +261,6 @@ class StoryBot(commands.Bot):
             # Let the user know we're processing
             await interaction.response.defer(thinking=True)
             
-            # Check story count for non-premium guilds
-            guild_id = str(interaction.guild_id)
-            is_premium = self.db.is_premium_guild(guild_id)
-            guild_settings = self.get_guild_settings(guild_id)
-            
-            if not is_premium:
-                story_count = self.db.get_story_count(guild_id)
-                max_stories = guild_settings.get('max_stored_stories', 5)
-                
-                if story_count >= max_stories:
-                    # Purge old stories if over limit
-                    self.db.purge_old_stories(guild_id, guild_settings.get('story_expiry_days', 30))
-                    
-                    await interaction.followup.send(
-                        "⚠️ You've reached the maximum number of stored stories for free users. "
-                        "Your oldest stories may be purged. Upgrade to premium for unlimited story storage!",
-                        ephemeral=True
-                    )
-            
             title = title[:100] or "Untitled Story"
             logger.info(f"Starting new story in channel {interaction.channel_id} with title '{title}' and opening text '{opening_text}'")
 
@@ -287,8 +268,7 @@ class StoryBot(commands.Bot):
             story_id = self.db.create_story(
                 channel_id=str(interaction.channel_id),
                 title=title,
-                opening_text=opening_text,
-                guild_id=guild_id
+                opening_text=opening_text
             )
             
             story = ActiveStory(
@@ -352,12 +332,10 @@ class StoryBot(commands.Bot):
                 return
             
             # get this guild's settings
-            guild_id = str(interaction.guild_id)
-            current_guild_settings = self.db.get_guild_settings(guild_id)
-            is_premium = self.db.is_premium_guild(guild_id)
+            current_guild_settings = self.db.get_guild_settings(str(interaction.guild_id))
             
             if len(content) > current_guild_settings["max_contribution_length"]:
-                await interaction.response.send_message(f"❌ Contribution too long! Max length: {current_guild_settings['max_contribution_length']} characters", ephemeral=True)
+                await interaction.response.send_message(f"❌ Contribution too long! Max length: {self.guild_settings['max_contribution_length']} characters", ephemeral=True)
                 await interaction.followup.send(f"**Your attempted contribution:** \n\n{content}", ephemeral=True)
                 return
             
@@ -370,31 +348,6 @@ class StoryBot(commands.Bot):
             await interaction.response.defer(thinking=True)
             
             story = self.active_stories[interaction.channel_id]
-            
-            # Check contribution count for auto-ending (free tier)
-            story_data = self.db.get_story(story.story_id)
-            contribution_count = story_data.get('contribution_count', 0) + 1
-            max_contributions = current_guild_settings.get('max_story_contributions', 100)
-            
-            # Update contribution count
-            self.db.update_story(story.story_id, {'contribution_count': contribution_count})
-            
-            # Auto-end story if contribution limit reached for non-premium users
-            if not is_premium and contribution_count >= max_contributions:
-                await interaction.followup.send(
-                    f"⚠️ This story has reached the maximum contribution limit ({max_contributions}) for free users. "
-                    "The story will be automatically ended after this contribution. "
-                    "Upgrade to premium for longer stories!",
-                    ephemeral=True
-                )
-                
-                # Add this contribution, then end the story
-                # Rest of the add_story implementation...
-                # [existing code for adding contribution]
-                
-                # Auto-end the story
-                await self.end_story_internal(interaction.channel_id)
-                return
             
             # Get story context for validation
             story_context = {
@@ -449,27 +402,6 @@ class StoryBot(commands.Bot):
                 await interaction.response.send_message("❌ No active story in this channel!")
                 return
             
-            # Check usage limits for non-premium users
-            guild_id = str(interaction.guild_id)
-            is_premium = self.db.is_premium_guild(guild_id)
-            guild_settings = self.get_guild_settings(guild_id)
-            
-            if not is_premium:
-                # Check daily limit
-                daily_limit = guild_settings.get('recap_daily_limit', 5)
-                current_usage = self.db.get_command_usage(guild_id, 'recap')
-                
-                if current_usage >= daily_limit:
-                    await interaction.response.send_message(
-                        f"❌ You've reached the daily limit of {daily_limit} recaps for free users. "
-                        "Upgrade to premium for unlimited recaps!",
-                        ephemeral=True
-                    )
-                    return
-                
-                # Increment usage counter
-                self.db.increment_command_usage(guild_id, 'recap')
-            
             # Let the user know we're processing
             await interaction.response.defer(thinking=True)
             
@@ -495,27 +427,6 @@ class StoryBot(commands.Bot):
             if interaction.channel_id not in self.active_stories:
                 await interaction.response.send_message("❌ No active story in this channel!")
                 return
-            
-            # Check usage limits for non-premium users
-            guild_id = str(interaction.guild_id)
-            is_premium = self.db.is_premium_guild(guild_id)
-            guild_settings = self.get_guild_settings(guild_id)
-            
-            if not is_premium:
-                # Check daily limit
-                daily_limit = guild_settings.get('plottwist_daily_limit', 5)
-                current_usage = self.db.get_command_usage(guild_id, 'plottwist')
-                
-                if current_usage >= daily_limit:
-                    await interaction.response.send_message(
-                        f"❌ You've reached the daily limit of {daily_limit} plot twists for free users. "
-                        "Upgrade to premium for unlimited plot twists!",
-                        ephemeral=True
-                    )
-                    return
-                
-                # Increment usage counter
-                self.db.increment_command_usage(guild_id, 'plottwist')
             
             # Let the user know we're processing
             await interaction.response.defer(thinking=True)
@@ -626,40 +537,8 @@ class StoryBot(commands.Bot):
                 else:
                     await interaction.channel.send("Story not exported. NOTE: Story will be deleted from the database after 30 days. Please use `/exportstory` before then if you want to save it. Alternatively, consider upgrading to premium (INSERT LINK HERE) for unlimited story storage.")
 
-        async def end_story_internal(self, channel_id):
-            """Internal method to end a story programmatically"""
-            if channel_id not in self.active_stories:
-                return False
             
-            story = self.active_stories[channel_id]
             
-            # Mark story as ended in Firebase
-            self.db.end_story(story.story_id, story.current_text)
-            
-            # Generate final summary
-            final_summary = await self.gemini.generate_story_recap(story.current_text)
-
-            # Update story's final text in Firebase
-            self.db.update_story(story.story_id, {
-                'final_text': story.current_text + f"\n\n{final_summary}"
-            })
-
-            logger.info(f"Auto-ended story {story.story_id} in channel {channel_id}")
-
-            # Remove the story from active stories
-            del self.active_stories[channel_id]
-            
-            # Send message to the channel
-            channel = self.get_channel(channel_id)
-            if channel:
-                embed = discord.Embed(
-                    title="🎬 Story Automatically Ended",
-                    description=f"Final Summary:\n\n{final_summary}\n\nThis story reached the maximum contribution limit. The story has been saved.",
-                    color=discord.Color.red()
-                )
-                await channel.send(embed=embed)
-            
-            return True
         
         @self.tree.command(name="renamestory", description="Change the title of a story")
         @app_commands.checks.has_permissions(administrator=True)
@@ -991,54 +870,6 @@ class StoryBot(commands.Bot):
             
             await interaction.response.send_message("✅ All settings have been reset to default values")
 
-        @self.tree.command(name="premium", description="Show premium status and benefits")
-        async def show_premium_status(interaction: discord.Interaction):
-            """Show premium status and benefits"""
-            guild_id = str(interaction.guild_id)
-            is_premium = self.db.is_premium_guild(guild_id)
-            guild_settings = self.get_guild_settings(guild_id)
-            
-            embed = discord.Embed(
-                title="✨ Premium Status",
-                color=discord.Color.gold() if is_premium else discord.Color.blue()
-            )
-            
-            status_text = "✅ ACTIVE" if is_premium else "❌ INACTIVE"
-            embed.add_field(name="Status", value=status_text, inline=False)
-            
-            # Show current limits
-            embed.add_field(
-                name="Story Length",
-                value=f"{'Unlimited' if is_premium else guild_settings.get('max_story_contributions', 100)} contributions",
-                inline=True
-            )
-            
-            embed.add_field(
-                name="Stored Stories",
-                value=f"{'Unlimited' if is_premium else guild_settings.get('max_stored_stories', 5)} stories",
-                inline=True
-            )
-            
-            embed.add_field(
-                name="Plot Twists",
-                value=f"{'Unlimited' if is_premium else guild_settings.get('plottwist_daily_limit', 5)}/day",
-                inline=True
-            )
-            
-            embed.add_field(
-                name="Recaps",
-                value=f"{'Unlimited' if is_premium else guild_settings.get('recap_daily_limit', 5)}/day",
-                inline=True
-            )
-            
-            embed.add_field(
-                name="Premium Status",
-                value="Yes" if is_premium else "No",
-                inline=True
-            )
-            
-            await interaction.response.send_message(embed=embed)
-
     async def on_ready(self):
         logger.info(f'Logged in as {self.user.name} ({self.user.id})')
         logger.info(f'Using Gemini model {self.gemini.model.model_name}')
@@ -1279,4 +1110,5 @@ def run_bot(token, gui_queue=None):
     bot.run(token)
 
 if __name__ == "__main__":
+    webserver.keep_alive()
     run_bot(os.environ["DISCORD_BOT_TOKEN"])

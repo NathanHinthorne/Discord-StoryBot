@@ -50,7 +50,6 @@ class StoryBotGUI(ttk.Window):
         self.api_key_entry.insert(0, self.config.get("gemini_api_key", ""))
         self.rate_limit_spinbox.set(self.config.get("rate_limit", 60))
         self.max_length_spinbox.set(self.config.get("max_contribution_length", 200))
-        self.intervention_spinbox.set(self.config.get("narrator_intervention_frequency", 5))
 
         # Add this after other initialization code
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -98,23 +97,20 @@ class StoryBotGUI(ttk.Window):
         """Save current settings to config file and update bot"""
         self.config.update({
             "gemini_api_key": self.api_key_entry.get(),
-            "rate_limit": int(self.rate_limit_spinbox.get()),
-            "max_contribution_length": int(self.max_length_spinbox.get()),
-            "narrator_intervention_frequency": int(self.intervention_spinbox.get())
         })
         
         # Save to config file
         with open("config.json", "w") as f:
             json.dump(self.config, f, indent=4)
         
-        # Save to bot settings file
-        bot_settings = {
-            "rate_limit": int(self.rate_limit_spinbox.get()),
-            "max_contribution_length": int(self.max_length_spinbox.get()),
-            "narrator_intervention_frequency": int(self.intervention_spinbox.get())
-        }
-        with open("bot_settings.json", "w") as f:
-            json.dump(bot_settings, f, indent=4)
+        # The bot will now read settings from Firestore instead of bot_settings.json
+        # We'll update the default settings in Firestore
+        if self.bot_connector and self.bot_connector.is_connected():
+            # Send command to update default settings
+            self.bot_connector.send_command("update_default_settings", {
+                "rate_limit": int(self.rate_limit_spinbox.get()),
+                "max_contribution_length": int(self.max_length_spinbox.get()),
+            })
         
         self.status_label.configure(text="Settings saved", bootstyle=SUCCESS)
 
@@ -263,16 +259,6 @@ class StoryBotGUI(ttk.Window):
         self.max_length_spinbox.pack(fill=X)
         self.max_length_spinbox.set(200)
         
-        ttk.Label(settings_frame, text="Narrator intervention frequency:").pack(fill=X)
-        self.intervention_spinbox = ttk.Spinbox(
-            settings_frame,
-            from_=1,
-            to=20,
-            increment=1
-        )
-        self.intervention_spinbox.pack(fill=X)
-        self.intervention_spinbox.set(5)
-        
         # Export Options
         export_frame = ttk.LabelFrame(control_frame, text="Export Options", padding=5)
         export_frame.pack(fill=X)
@@ -313,6 +299,7 @@ class StoryBotGUI(ttk.Window):
 if __name__ == "__main__":
     app = StoryBotGUI()
     app.mainloop()
+
 
 
 
