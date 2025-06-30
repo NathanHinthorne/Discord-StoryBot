@@ -5,6 +5,7 @@ import json
 import logging
 import os
 from dotenv import load_dotenv
+from google_docs_exporter import GoogleDocsExporter
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -14,9 +15,6 @@ class FirebaseDatabase:
     def __init__(self):
         load_dotenv()
 
-        # self.db = firestore.client()
-
-        
         # Parse JSON string from environment variable
         # This approach avoids the need to write the credentials to a file
         cred_dict = json.loads(os.environ.get("FIREBASE_CREDENTIALS_JSON"))
@@ -36,6 +34,8 @@ class FirebaseDatabase:
         story_ref = self.db.collection('stories').document()
         story_id = story_ref.id
         
+        # TODO: rename "final_text" to "current_text"
+
         story_data = {
             'channel_id': str(channel_id),
             'guild_id': str(guild_id),
@@ -150,22 +150,17 @@ class FirebaseDatabase:
         if doc.exists:
             return doc.to_dict()
         return self.get_default_settings()
-
+    
     def get_default_settings(self):
         """Return default settings for a guild"""
         return {
-            "rate_limit": 60,
             "max_contribution_length": 350,
             "designated_channel": None,
-            "is_rogue": False,
-            "rogue_channel": None,
-            "deny_request_percentage": 0.1,
             "premium": False,
-            # Free tier limitations
-            "max_story_contributions": 100,  # Max contributions before auto-ending
-            "max_stored_stories": 5,         # Max stories stored before auto-purging
-            "plottwist_daily_limit": 5,      # Daily limit for plot twists
-            "recap_daily_limit": 5,          # Daily limit for recaps
+            "max_story_contributions": 75,  # Max contributions before auto-ending
+            "max_stored_stories": 3,         # Max stories stored before auto-purging
+            "plottwist_daily_limit": 1,      # Daily limit for plot twists
+            "recap_daily_limit": 2,          # Daily limit for recaps
             "story_expiry_days": 30          # Days before stories are auto-purged
         }
 
@@ -182,35 +177,54 @@ class FirebaseDatabase:
 
     def is_premium_guild(self, guild_id):
         """Check if a guild has premium status"""
-        return True # For testing
-        # doc = self.db.collection('premium_guilds').document(guild_id).get()
-        # return doc.exists
+        doc = self.db.collection('premium_guilds').document(guild_id).get()
+        return doc.exists
 
     def get_command_usage(self, guild_id, command_name, period="daily"):
         """Get usage count for a specific command in a guild"""
         today = datetime.now().strftime("%Y-%m-%d")
-        doc = self.db.collection('command_usage').document(f"{guild_id}_{command_name}_{today}").get()
+        guild_ref = self.db.collection('command_usage').document(str(guild_id))
+        doc = guild_ref.get()
+        
         if doc.exists:
-            return doc.to_dict().get('count', 0)
+            guild_data = doc.to_dict()
+            command_data = guild_data.get(command_name, {})
+            # If the stored date matches today, return the count
+            if command_data.get('date') == today:
+                return command_data.get('count', 0)
+        
         return 0
 
     def increment_command_usage(self, guild_id, command_name):
         """Increment usage count for a specific command in a guild"""
         today = datetime.now().strftime("%Y-%m-%d")
-        doc_ref = self.db.collection('command_usage').document(f"{guild_id}_{command_name}_{today}")
+        guild_ref = self.db.collection('command_usage').document(str(guild_id))
         
         # Use transactions to safely increment the counter
         @firestore.transactional
         def update_in_transaction(transaction, doc_ref):
             doc = doc_ref.get(transaction=transaction)
             if doc.exists:
-                count = doc.to_dict().get('count', 0) + 1
-                transaction.update(doc_ref, {'count': count})
+                guild_data = doc.to_dict()
+                command_data = guild_data.get(command_name, {})
+                
+                # Check if we need to reset for a new day
+                if command_data.get('date') != today:
+                    command_data = {'count': 1, 'date': today}
+                else:
+                    command_data['count'] = command_data.get('count', 0) + 1
+                
+                # Update the command data within the guild document
+                guild_data[command_name] = command_data
+                transaction.set(doc_ref, guild_data)
             else:
-                transaction.set(doc_ref, {'count': 1, 'date': today})
+                # Create new guild document with this command
+                transaction.set(doc_ref, {
+                    command_name: {'count': 1, 'date': today}
+                })
         
         transaction = self.db.transaction()
-        update_in_transaction(transaction, doc_ref)
+        update_in_transaction(transaction, guild_ref)
         
         # Return the new count
         return self.get_command_usage(guild_id, command_name)
@@ -244,4 +258,64 @@ class FirebaseDatabase:
             # Delete story
             story.reference.delete()
 
+    def purge_old_stories_for_all_guilds(self, google_docs_exporter: GoogleDocsExporter, days_to_keep=30):
+        """
+        Purge old stories for all non-premium guilds
+        
+        Args:
+            days_to_keep: Number of days to keep stories before purging
+        
+        Returns:
+            dict: Mapping of guild_id to number of stories purged
+        """
+        results = {}
+        
+        # Get all non-premium guilds
+        settings_docs = self.db.collection('settings').stream()
+        for doc in settings_docs:
+            guild_id = doc.id
+            settings = doc.to_dict()
+            
+            # Skip premium guilds
+            # TODO: remove temp values for CAM and Pals server
+            if settings.get('premium', False) or guild_id == "1036475105393524736" or guild_id == "1179198996393242814":
+                continue
+            
+            # Get guild-specific expiry setting
+            guild_days_to_keep = settings.get('story_expiry_days', days_to_keep)
+            guild_cutoff = datetime.now() - timedelta(days=guild_days_to_keep)
+            
+            # Get stories older than cutoff date for this guild
+            old_stories = self.db.collection('stories')\
+                            .where('guild_id', '==', str(guild_id))\
+                            .where('ended_at', '<', guild_cutoff)\
+                            .stream()
+            
+            # Count purged stories
+            purged_count = 0
+            
+            # Delete each story and its contributions
+            for story in old_stories:
+                story_id = story.id
+                # Delete contributions
+                contributions = self.db.collection('contributions')\
+                                    .where('story_id', '==', story_id)\
+                                    .stream()
+                for contrib in contributions:
+                    contrib.reference.delete()
+                # Delete story
+                story.reference.delete()
+                purged_count += 1
 
+            # Delete Google Docs if available
+            if google_docs_exporter and google_docs_exporter.is_available():
+                doc_url = story.get('doc_url')
+                if doc_url:
+                    doc_id = doc_url.split('/')[-1]
+                    google_docs_exporter.delete_doc(doc_id)
+
+            if purged_count > 0:
+                results[guild_id] = purged_count
+                logger.info(f"Purged {purged_count} old stories for guild {guild_id}")
+        
+        return results
