@@ -82,8 +82,15 @@ class GoogleDocsExporter:
                 break
 
         return clean_text, style_requests
+    
+    def delete_doc(self, doc_id):
+        """Permanently delete a Google Doc, freeing up space in Google Drive."""
+        try:
+            self.drive_service.files().delete(fileId=doc_id).execute()
+            logger.info(f"Document {doc_id} deleted successfully")
+        except HttpError as error:
+            logger.error(f"Error deleting document {doc_id}: {error}")
 
-            
     async def export_story_to_doc(self, story, contributions):
         """
         Export story to a Google Doc
