@@ -1,6 +1,7 @@
 import firebase_admin
 from firebase_admin import credentials, firestore
 from datetime import datetime, timedelta
+from google.cloud.firestore_v1.base_query import FieldFilter
 import json
 import logging
 import os
@@ -158,9 +159,9 @@ class FirebaseDatabase:
             "designated_channel": None,
             "premium": False,
             "max_story_contributions": 75,  # Max contributions before auto-ending
-            "max_stored_stories": 3,         # Max stories stored before auto-purging
+            "max_stored_stories": 1,         # Max stories stored before auto-purging
             "plottwist_daily_limit": 1,      # Daily limit for plot twists
-            "recap_daily_limit": 2,          # Daily limit for recaps
+            "recap_daily_limit": 1,          # Daily limit for recaps
             "story_expiry_days": 30          # Days before stories are auto-purged
         }
 
@@ -236,31 +237,32 @@ class FirebaseDatabase:
                     .stream()
         return len(list(stories))
 
-    def purge_old_stories(self, guild_id, days_to_keep=30):
-        """Purge stories older than specified days for non-premium guilds"""
-        cutoff_date = datetime.now() - timedelta(days=days_to_keep)
+    def purge_oldest_story(self, guild_id):
+        """Purge the oldest story for a guild"""
         
-        # Get stories older than cutoff date
-        old_stories = self.db.collection('stories')\
+        # Get oldest started stories
+        oldest_story = self.db.collection('stories')\
                         .where('guild_id', '==', str(guild_id))\
-                        .where('ended_at', '<', cutoff_date)\
+                        .order_by('started_at', direction=firestore.Query.ASCENDING)\
+                        .limit(1)\
                         .stream()
         
-        # Delete each story and its contributions
-        for story in old_stories:
-            story_id = story.id
-            # Delete contributions
-            contributions = self.db.collection('contributions')\
-                            .where('story_id', '==', story_id)\
-                            .stream()
-            for contrib in contributions:
-                contrib.reference.delete()
-            # Delete story
-            story.reference.delete()
+        oldest_story = next(oldest_story, None)
+        if not oldest_story:
+            return
+        
+        # Delete story and its contributions
+        contributions = self.db.collection('contributions')\
+                        .where('story_id', '==', oldest_story.id)\
+                        .stream()
+        for contrib in contributions:
+            contrib.reference.delete()
+        # Delete story
+        oldest_story.reference.delete()
 
     def purge_old_stories_for_all_guilds(self, google_docs_exporter: GoogleDocsExporter, days_to_keep=30):
         """
-        Purge old stories for all non-premium guilds
+        Purge old stories for all guilds
         
         Args:
             days_to_keep: Number of days to keep stories before purging
@@ -270,25 +272,21 @@ class FirebaseDatabase:
         """
         results = {}
         
-        # Get all non-premium guilds
+        # Get all guilds
         settings_docs = self.db.collection('settings').stream()
         for doc in settings_docs:
             guild_id = doc.id
             settings = doc.to_dict()
-            
-            # Skip premium guilds
-            # TODO: remove temp values for CAM and Pals server
-            if settings.get('premium', False) or guild_id == "1036475105393524736" or guild_id == "1179198996393242814":
-                continue
             
             # Get guild-specific expiry setting
             guild_days_to_keep = settings.get('story_expiry_days', days_to_keep)
             guild_cutoff = datetime.now() - timedelta(days=guild_days_to_keep)
             
             # Get stories older than cutoff date for this guild
+
             old_stories = self.db.collection('stories')\
-                            .where('guild_id', '==', str(guild_id))\
-                            .where('ended_at', '<', guild_cutoff)\
+                            .where(filter=FieldFilter('guild_id', '==', str(guild_id)))\
+                            .where(filter=FieldFilter('ended_at', '<', guild_cutoff))\
                             .stream()
             
             # Count purged stories
@@ -297,22 +295,28 @@ class FirebaseDatabase:
             # Delete each story and its contributions
             for story in old_stories:
                 story_id = story.id
+                story_data = story.to_dict()  # Get the story data
+                
+                # Delete Google Docs if available
+                if google_docs_exporter and google_docs_exporter.is_available():
+                    doc_url = story_data.get('doc_url')
+                    if doc_url:
+                        doc_id = doc_url.split('/')[-2]  # Usually the ID is second-to-last
+                        try:
+                            google_docs_exporter.delete_doc(doc_id)
+                        except Exception as e:
+                            logger.error(f"Failed to delete Google Doc {doc_id}: {e}")
+                
                 # Delete contributions
                 contributions = self.db.collection('contributions')\
                                     .where('story_id', '==', story_id)\
                                     .stream()
                 for contrib in contributions:
                     contrib.reference.delete()
+                
                 # Delete story
                 story.reference.delete()
                 purged_count += 1
-
-            # Delete Google Docs if available
-            if google_docs_exporter and google_docs_exporter.is_available():
-                doc_url = story.get('doc_url')
-                if doc_url:
-                    doc_id = doc_url.split('/')[-1]
-                    google_docs_exporter.delete_doc(doc_id)
 
             if purged_count > 0:
                 results[guild_id] = purged_count

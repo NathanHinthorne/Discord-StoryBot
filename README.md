@@ -53,4 +53,8 @@
 - **Firebase API** - For its Firestore database
 - **Google Docs API** - For exporting stories to Google Docs
 
+## 📘 Future Plans
+
+- 
+
 ---

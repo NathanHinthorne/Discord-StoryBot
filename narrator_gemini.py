@@ -44,6 +44,8 @@ class NarratorGemini:
         self.prompts = {
             "story_recap": """Provide a concise summary of this story's key events and current 
             situation. Keep it engaging and under 200 words.
+
+            If there is nothing to go on, do not generate a recap. Instead, simply say "Well... that was uneventful."
             
             Story so far:
             {story_text}
@@ -62,6 +64,8 @@ class NarratorGemini:
             Make it consistent with the established narrative. Keep it under 300 words and 
             ensure it's 2 paragraphs. Do not include information about why the twist happens.
             Do not include information related to pagan rituals or practices.
+
+            If there is nothing to go on, do not generate a plot twist. Instead, return an empty string.
             
             Story so far:
             {story_text}

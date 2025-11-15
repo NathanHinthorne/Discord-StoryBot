@@ -165,11 +165,11 @@ class StoryBot(commands.Bot):
                 description=(
                     "I'm a collaborative storytelling bot created by Nathan!\n\n"
                     "I help users create and tell stories together. "
-                    "Start a new story with `/startstory [opening text]`, then everyone can contribute "
+                    "Start a new story with `/startstory <text>`, then everyone can contribute "
                     "using `/add`.\n\n"
                     "**Some key commands:**\n"
-                    "• `/startstory [opening text]` - Begin a new story\n"
-                    "• `/add <text>` - Add to the current story\n"
+                    "• `/startstory <text>` - Begin a new story\n"
+                    "• `/add [text]` - Add to the current story\n"
                     "• `/plottwist` - Let AI add an unexpected twist\n"
                     "• `/recap` - Get a summary of the story so far\n\n"
                 ),
@@ -194,16 +194,18 @@ class StoryBot(commands.Bot):
 
             logger.info(f"Remove designated channel for guild {guild_id}")
 
-        @self.tree.command(name="getchannel", description="Get the current designated bot channel for the server")
-        async def get_channel(interaction: discord.Interaction):
-            """Get the current designated bot channel for the server"""
+        @self.tree.command(name="setmaxlength", description="(Admin) Set the maximum length of a contribution")
+        @app_commands.describe(max_length="The maximum length (in characters) of a contribution")
+        @app_commands.checks.has_permissions(administrator=True)
+        async def set_max_length(interaction: discord.Interaction, max_length: int):
+            """Set the maximum length of a contribution"""
+            if max_length <= 0 or max_length > 1000:
+                await interaction.response.send_message("❌ Value must be greater than 0 and less than 1000", ephemeral=True)
+                return
+            
             guild_id = str(interaction.guild_id)
-            channel_id = self.get_guild_setting(guild_id, "designated_channel")
-
-            if channel_id:
-                await interaction.response.send_message(f"Designated bot channel: <#{channel_id}>")
-            else:
-                await interaction.response.send_message("No designated bot channel set for this server.")
+            self.update_guild_setting(guild_id, "max_contribution_length", max_length)
+            await interaction.response.send_message(f"✅ Set maximum contribution length to {max_length} characters!")
 
         @self.tree.command(name="help", description="Display all available commands and usage tips")
         async def help_command(interaction: discord.Interaction):
@@ -230,8 +232,7 @@ class StoryBot(commands.Bot):
         # Storytelling commands
         @self.tree.command(name="startstory", description="Begin a new story")
         @app_commands.describe(opening_text="An opening for the story. Around 30-100 words would be nice.")
-        @app_commands.describe(title="The title of the story (max 100 characters)")
-        async def start_story(interaction: discord.Interaction, opening_text: str, title: Optional[str] = None):
+        async def start_story(interaction: discord.Interaction, opening_text: str):
             # Check if command is used in designated channel
             if not await self.is_designated_channel(interaction):
                 await interaction.response.send_message("❌ Commands can only be used in the designated channel.", ephemeral=True)
@@ -256,23 +257,19 @@ class StoryBot(commands.Bot):
                 max_stories = guild_settings.get('max_stored_stories')
                 
                 if story_count >= max_stories:
-                    # Purge old stories if over limit
-                    self.db.purge_old_stories(guild_id, guild_settings.get("story_expiry_days"))
+                    # Purge oldest story if over limit
+                    self.db.purge_oldest_story(guild_id)
                     
                     await interaction.followup.send(
                         "⚠️ You've reached the maximum number of stored stories for free tier users. "
-                        "Your oldest stories may be purged. Upgrade to premium for unlimited story storage!",
+                        "Your oldest story has been removed to make room for this one. Upgrade to premium for unlimited story storage!",
                         ephemeral=True
                     )
-            
-            if not title:
-                title = "Untitled Story"
-            else:
-                title = title[:100]
 
-            logger.info(f"Starting new story in channel {interaction.channel_id} with title '{title}' and opening text '{opening_text}'")
+            logger.info(f"Starting new story in channel {interaction.channel_id} with opening text '{opening_text}'")
 
             # Create new story in Firebase
+            title = "Untitled Story"
             story_id = self.db.create_story(
                 channel_id=str(interaction.channel_id),
                 title=title,
@@ -420,7 +417,7 @@ class StoryBot(commands.Bot):
                 
                 if current_usage >= daily_limit:
                     await interaction.response.send_message(
-                        f"❌ You've reached the daily limit of {daily_limit} recaps for free tier users. "
+                        f"❌ You've reached the daily limit of {daily_limit} recap(s) for free tier users. "
                         "Upgrade to premium for unlimited recaps!",
                         ephemeral=True
                     )
@@ -468,7 +465,7 @@ class StoryBot(commands.Bot):
                 
                 if current_usage >= daily_limit:
                     await interaction.response.send_message(
-                        f"❌ You've reached the daily limit of {daily_limit} plot twists for free tier users. "
+                        f"❌ You've reached the daily limit of {daily_limit} plot twist(s) for free tier users. "
                         "Upgrade to premium for unlimited plot twists!",
                         ephemeral=True
                     )
@@ -524,8 +521,10 @@ class StoryBot(commands.Bot):
             story.contributions.append(contribution)
             story.current_text = updated_text
 
-        @self.tree.command(name="endstory", description="End the current story")
-        async def end_story(interaction: discord.Interaction):
+        @self.tree.command(name="endstory", description="(Admin) End the current story")
+        @app_commands.describe(story_title="The title of the story (max 100 characters)")
+        @app_commands.checks.has_permissions(administrator=True)
+        async def end_story(interaction: discord.Interaction, story_title: str):
             # Check if command is used in designated channel
             if not await self.is_designated_channel(interaction):
                 return
@@ -534,11 +533,18 @@ class StoryBot(commands.Bot):
                 await interaction.response.send_message("❌ No active story in this channel!")
                 return
             
+            if len(story_title) == 0:
+                await interaction.response.send_message("❌ Please provide a title for the story.", ephemeral=True)
+                return
+            
             # Let the user know we're processing
             await interaction.response.defer(thinking=True)
             
             story = self.active_stories[interaction.channel_id]
             story_id = story.story_id
+
+            story_title = story_title[:100]
+            self.db.update_story(story_id, {'title': story_title})
             
             # Mark story as ended in Firebase
             self.db.end_story(story.story_id, story.current_text)
@@ -567,7 +573,7 @@ class StoryBot(commands.Bot):
             await interaction.followup.send(embed=embed)
 
             # Create export options view
-            export_view = View(timeout=300)  # 5 minute timeout
+            export_view = View(timeout=2)  # 5 minute timeout
             export_button = discord.ui.Button(label="Export to Google Docs", style=discord.ButtonStyle.primary)
             
             async def export_button_callback(button_interaction: discord.Interaction):
@@ -585,6 +591,7 @@ class StoryBot(commands.Bot):
 
             export_button.callback = export_button_callback
             export_view.add_item(export_button)
+
             
             # Add timeout handler
             async def on_export_timeout():
@@ -597,7 +604,6 @@ class StoryBot(commands.Bot):
                     )
                 except:
                     pass
-
             export_view.on_timeout = on_export_timeout
             
             # Send export options
@@ -613,7 +619,7 @@ class StoryBot(commands.Bot):
                 view=export_view
             )
 
-        @self.tree.command(name="renamestory", description="(Admin) Select a story and change its title")
+        @self.tree.command(name="renamestory", description="(Admin) Select a story from a dropdown list and change its title")
         @app_commands.checks.has_permissions(administrator=True)
         async def rename_story(interaction: discord.Interaction):
             """Rename a story"""
@@ -775,63 +781,10 @@ class StoryBot(commands.Bot):
             channel_text = f"<#{channel_id}>" if channel_id else "None set"
             embed.add_field(name="Designated Channel", value=channel_text, inline=True)
             
-            # Add premium status
-            premium_status = "Yes" if self.db.is_premium_guild(guild_id) else "No"
-            embed.add_field(name="Premium Status", value=premium_status, inline=True)
-
             # Add footer with help text
-            embed.set_footer(text="Use /changesetting to modify these values")
+            embed.set_footer(text="Use /setmaxlength and /setchannel to modify these values")
             
             await interaction.response.send_message(embed=embed)
-
-        @self.tree.command(name="changesetting", description="(Admin) Change bot settings")
-        @app_commands.describe(
-            setting="The setting to change",
-            value="The new value for the setting"
-        )
-        @app_commands.choices(setting=[
-            app_commands.Choice(name="Max Contribution Length", value="max_contribution_length"),
-        ])
-        @app_commands.checks.has_permissions(administrator=True)
-        async def change_setting(interaction: discord.Interaction, setting: str, value: str):
-            """Change a setting for this server"""
-            guild_id = str(interaction.guild_id)
-            
-            # Convert value to appropriate type based on setting
-            try:
-                if setting in ["max_contribution_length"]:
-                    converted_value = int(value)
-                    if converted_value <= 0:
-                        await interaction.response.send_message("❌ Value must be greater than 0", ephemeral=True)
-                        return
-                else:
-                    converted_value = value
-            except ValueError:
-                await interaction.response.send_message("❌ Invalid value format. Please provide a number.", ephemeral=True)
-                return
-            
-            # Update the setting
-            self.update_guild_setting(guild_id, setting, converted_value)
-            
-            # TODO: Format the value for display if needed
-            display_value = value
-            
-            await interaction.response.send_message(f"✅ Updated {setting} to {display_value}")
-
-        @self.tree.command(name="resetsettings", description="(Admin) Reset all settings to default values")
-        @app_commands.checks.has_permissions(administrator=True)
-        async def reset_settings(interaction: discord.Interaction):
-            """Reset all settings to default values"""
-            guild_id = str(interaction.guild_id)
-            
-            # Get default settings
-            default_settings = self.db.get_default_settings()
-            
-            # Update guild settings
-            self.guild_settings[guild_id] = default_settings.copy()
-            self.db.update_guild_settings(guild_id, default_settings)
-            
-            await interaction.response.send_message("✅ All settings have been reset to default values")
 
         @self.tree.command(name="premium", description="Show premium status and benefits")
         async def show_premium_status(interaction: discord.Interaction):
@@ -880,13 +833,8 @@ class StoryBot(commands.Bot):
             """List all stories for this channel"""
             # Get recent stories
             channel_id = str(interaction.channel_id)
-            guild_id = str(interaction.guild_id)
-            is_premium = self.db.is_premium_guild(guild_id)
             
-            # Get more stories for premium users
-            limit = 20 if is_premium else 5
-            
-            recent_stories = self.db.get_recent_stories(channel_id, limit)
+            recent_stories = self.db.get_recent_stories(channel_id, limit=50)
             if not recent_stories:
                 await interaction.response.send_message("❌ No stories found for this channel.")
                 return
@@ -909,7 +857,7 @@ class StoryBot(commands.Bot):
                     date_str = datetime.fromtimestamp(started_at.timestamp()).strftime("%B %d, %Y")
                 
                 # Check if story is active or completed
-                status = "🟢 Active" if story.get('ended_at') is None else "🔴 Completed"
+                status = "🏃‍♂️‍➡️ Active" if story.get('ended_at') is None else "✅ Completed"
                 
                 # Get contribution count
                 contribution_count = story.get('contribution_count', 0)
@@ -923,10 +871,6 @@ class StoryBot(commands.Bot):
                     field_value += f"\n[View in Google Docs]({doc_url})"
                 
                 embed.add_field(name=title, value=field_value, inline=False)
-            
-            # Add footer with premium info
-            if not is_premium:
-                embed.set_footer(text="Free tier users can view up to 5 recent stories. Upgrade to premium to access all stories!")
             
             await interaction.response.send_message(embed=embed)
 
@@ -958,7 +902,7 @@ class StoryBot(commands.Bot):
         if channel:
             embed = discord.Embed(
                 title="🎬 Story Automatically Ended",
-                description=f"Final Summary:\n\n{final_summary}\n\nThis story reached the maximum contribution limit. The story has been saved.",
+                description=f"**Final Summary**:\n\n{final_summary}\n\nThis story reached the maximum contribution limit. The story has been saved.",
                 color=discord.Color.red()
             )
             await channel.send(embed=embed)
@@ -1109,6 +1053,13 @@ class StoryBot(commands.Bot):
             else:
                 await interaction.followup.send(f"❌ Failed to export story: {result}")
 
+    async def rename_story_by_id(self, interaction: discord.Interaction, story_id: str, new_title: str):
+        """Helper method to rename a story by ID"""
+        self.db.update_story(story_id, {'title': new_title})
+
+        await interaction.followup.send(f"✅ Story renamed to '{new_title}'")
+        return True
+
     async def create_story_selector(self, interaction: discord.Interaction, channel_id=None, limit=5, 
                                    placeholder="Select a story", callback=None, include_active=True):
         """
@@ -1200,7 +1151,7 @@ class StoryBot(commands.Bot):
         while not self.is_closed():
             try:
                 # Run purge operation
-                results = self.db.purge_old_stories_for_all_guilds(self.google_docs_exporter)
+                results = self.db.purge_old_stories_for_all_guilds(self.docs_exporter)
                 
                 # Log results
                 total_purged = sum(results.values())
@@ -1235,7 +1186,7 @@ class StoryBot(commands.Bot):
             # Send notification
             await channel.send(
                 f"⚠️ **Automatic Maintenance:** {purged_count} old stories have been removed due to the free tier storage limit. "
-                f"Upgrade to premium for unlimited story storage!"
+                f"Upgrade to premium for longer storage."
             )
         except Exception as e:
             logger.error(f"Error notifying guild {guild_id} about purge: {e}")
