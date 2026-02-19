@@ -15,7 +15,7 @@ logger = logging.getLogger('narrator_gemini')
 class NarratorGemini:
     def __init__(self, api_key: str, firebase_db=None):
         genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel("gemini-2.0-flash")
+        self.model = genai.GenerativeModel("gemini-2.5-flash")
         
         # Use the provided Firebase DB instance or create a new connection
         if firebase_db:
