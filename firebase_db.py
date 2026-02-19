@@ -28,15 +28,46 @@ class FirebaseDatabase:
         except Exception as e:
             logger.error(f"Error initializing Firestore: {e}")
             raise e
+        
+    def delete_existing_story(self, guild_id: str, google_docs_exporter: GoogleDocsExporter):
+        """Delete existing story and its contributions"""
+        stories = self.db.collection('stories')\
+                    .where('guild_id', '==', str(guild_id))\
+                    .stream()
+        
+        for story in stories: # there should only be one story... but just in case
+            story_id = story.id
+            story_data = story.to_dict()
+
+            # Delete Google Docs if available
+            if google_docs_exporter and google_docs_exporter.is_available():
+                doc_url = story_data.get('doc_url')
+                if doc_url:
+                    doc_id = doc_url.split('/')[-2]  # Usually the ID is second-to-last
+                    try:
+                        google_docs_exporter.delete_doc(doc_id)
+                    except Exception as e:
+                        logger.error(f"Failed to delete Google Doc {doc_id}: {e}")
+            
+            # Delete contributions
+            contributions = self.db.collection('contributions')\
+                                .where('story_id', '==', story_id)\
+                                .stream()
+            for contrib in contributions:
+                contrib.reference.delete()
+            
+            # Delete story
+            story.reference.delete()
     
     # Story operations
-    def create_story(self, channel_id, title, opening_text, guild_id):
+    def create_story(self, channel_id, title, opening_text, guild_id, google_docs_exporter: GoogleDocsExporter = None):
         """Create a new story and return its ID"""
+        # Enforce single active story: remove any existing stories and their contributions
+        self.delete_existing_story(guild_id, google_docs_exporter)
+
         story_ref = self.db.collection('stories').document()
         story_id = story_ref.id
         
-        # TODO: rename "final_text" to "current_text"
-
         story_data = {
             'channel_id': str(channel_id),
             'guild_id': str(guild_id),
@@ -46,7 +77,8 @@ class FirebaseDatabase:
             'started_at': datetime.now(),
             'ended_at': None,
             'doc_url': None,
-            'contribution_count': 1  # Start with 1 for the opening
+            'contribution_count': 1,  # Start with 1 for the opening
+            'isExported': False
         }
         
         story_ref.set(story_data)
@@ -159,7 +191,6 @@ class FirebaseDatabase:
             "designated_channel": None,
             "premium": False,
             "max_story_contributions": 75,  # Max contributions before auto-ending
-            "max_stored_stories": 1,         # Max stories stored before auto-purging
             "plottwist_daily_limit": 1,      # Daily limit for plot twists
             "recap_daily_limit": 1,          # Daily limit for recaps
             "story_expiry_days": 30          # Days before stories are auto-purged
@@ -231,38 +262,15 @@ class FirebaseDatabase:
         return self.get_command_usage(guild_id, command_name)
 
     def get_story_count(self, guild_id):
-        """Get count of stored stories for a guild"""
+        """Get count of stored stories for a guild. There *should* only be one at most."""
         stories = self.db.collection('stories')\
                     .where('guild_id', '==', str(guild_id))\
                     .stream()
         return len(list(stories))
 
-    def purge_oldest_story(self, guild_id):
-        """Purge the oldest story for a guild"""
-        
-        # Get oldest started stories
-        oldest_story = self.db.collection('stories')\
-                        .where('guild_id', '==', str(guild_id))\
-                        .order_by('started_at', direction=firestore.Query.ASCENDING)\
-                        .limit(1)\
-                        .stream()
-        
-        oldest_story = next(oldest_story, None)
-        if not oldest_story:
-            return
-        
-        # Delete story and its contributions
-        contributions = self.db.collection('contributions')\
-                        .where('story_id', '==', oldest_story.id)\
-                        .stream()
-        for contrib in contributions:
-            contrib.reference.delete()
-        # Delete story
-        oldest_story.reference.delete()
-
-    def purge_old_stories_for_all_guilds(self, google_docs_exporter: GoogleDocsExporter, days_to_keep=30):
+    def purge_old_stories_in_guilds(self, google_docs_exporter: GoogleDocsExporter, days_to_keep=30):
         """
-        Purge old stories for all guilds
+        Purge old stories for all non-premium guilds
         
         Args:
             days_to_keep: Number of days to keep stories before purging
@@ -277,13 +285,16 @@ class FirebaseDatabase:
         for doc in settings_docs:
             guild_id = doc.id
             settings = doc.to_dict()
+
+            # Skip premium guilds
+            if settings.get('premium', False):
+                continue
             
             # Get guild-specific expiry setting
             guild_days_to_keep = settings.get('story_expiry_days', days_to_keep)
             guild_cutoff = datetime.now() - timedelta(days=guild_days_to_keep)
             
             # Get stories older than cutoff date for this guild
-
             old_stories = self.db.collection('stories')\
                             .where(filter=FieldFilter('guild_id', '==', str(guild_id)))\
                             .where(filter=FieldFilter('ended_at', '<', guild_cutoff))\

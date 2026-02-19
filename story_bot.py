@@ -232,6 +232,7 @@ class StoryBot(commands.Bot):
         # Storytelling commands
         @self.tree.command(name="startstory", description="Begin a new story")
         @app_commands.describe(opening_text="An opening for the story. Around 30-100 words would be nice.")
+        @app_commands.checks.has_permissions(administrator=True)
         async def start_story(interaction: discord.Interaction, opening_text: str):
             # Check if command is used in designated channel
             if not await self.is_designated_channel(interaction):
@@ -240,41 +241,55 @@ class StoryBot(commands.Bot):
                 return
             
             if interaction.channel_id in self.active_stories:
-                await interaction.response.send_message("❌ A story is already active in this channel!")
+                await interaction.response.send_message("❌ A story is already active in this channel! An admin must end it with `/endstory` first.")
                 await interaction.followup.send(f"**Your attempted opening:** \n\n{opening_text}", ephemeral=True)
                 return
             
             # Let the user know we're processing
             await interaction.response.defer(thinking=True)
             
-            # Check story count for non-premium guilds
             guild_id = str(interaction.guild_id)
-            is_premium = self.db.is_premium_guild(guild_id)
-            guild_settings = self.db.get_guild_settings(guild_id)
+            story_count = self.db.get_story_count(guild_id)
             
-            if not is_premium:
-                story_count = self.db.get_story_count(guild_id)
-                max_stories = guild_settings.get('max_stored_stories')
+            if story_count == 0: # First story in the guild
+                await create_new_story(interaction, guild_id, opening_text)
+
+            else:
+                # UI buttons to cancel or proceed
+                view = View(timeout=300) 
+                cancel_button = discord.ui.Button(label="Cancel", style=discord.ButtonStyle.danger)
+                proceed_button = discord.ui.Button(label="Proceed", style=discord.ButtonStyle.success)
+                view.add_item(cancel_button)
+                view.add_item(proceed_button)
+
+                async def cancel_button_callback(button_interaction: discord.Interaction):
+                    await button_interaction.response.send_message("❌ Story creation cancelled.", ephemeral=True)
+                    view.stop()
+                cancel_button.callback = cancel_button_callback
                 
-                if story_count >= max_stories:
-                    # Purge oldest story if over limit
-                    self.db.purge_oldest_story(guild_id)
-                    
-                    await interaction.followup.send(
-                        "⚠️ You've reached the maximum number of stored stories for free tier users. "
-                        "Your oldest story has been removed to make room for this one. Upgrade to premium for unlimited story storage!",
-                        ephemeral=True
-                    )
+                async def proceed_button_callback(button_interaction: discord.Interaction):
+                    await button_interaction.response.send_message("✅ Proceeding with story creation...", ephemeral=True)
+                    view.stop()
+                    await create_new_story(interaction, guild_id, opening_text)
+                proceed_button.callback = proceed_button_callback
 
-            logger.info(f"Starting new story in channel {interaction.channel_id} with opening text '{opening_text}'")
+                # Get the guild's designated channel
+                settings = self.db.get_guild_settings(guild_id)
+                is_exported = settings.get('isExported', False)
 
-            # Create new story in Firebase
+                if is_exported:
+                    await interaction.followup.send("It's recommended to make a copy of the previous story's Google Doc before proceeding, as it will be overwritten.", view=view)
+                else:
+                    await interaction.followup.send("⚠️ Your last story has not been exported. To keep it, consider exporting it with `/exportstory` and making a copy before starting a new story.", view=view)
+
+        async def create_new_story(interaction: discord.Interaction, guild_id: str, opening_text: str):
             title = "Untitled Story"
             story_id = self.db.create_story(
                 channel_id=str(interaction.channel_id),
                 title=title,
                 opening_text=opening_text,
-                guild_id=guild_id
+                guild_id=guild_id,
+                google_docs_exporter=self.docs_exporter
             )
             
             story = ActiveStory(
@@ -286,8 +301,13 @@ class StoryBot(commands.Bot):
                 contributions=[],
                 started_at=datetime.now()
             )
+
+            # remove old story from active stories if it exists
+            if interaction.channel_id in self.active_stories:
+                del self.active_stories[interaction.channel_id]
             
-            self.active_stories[interaction.channel_id] = story
+            # Store active story keyed by channel id (int)
+            self.active_stories[int(interaction.channel_id)] = story
 
             # create new contribution for opening text
             contribution = StoryContribution(
@@ -558,9 +578,6 @@ class StoryBot(commands.Bot):
             })
 
             logger.info(f"Ended story {story.story_id} in channel {interaction.channel_id}")
-
-            # Remove the story from active stories
-            del self.active_stories[interaction.channel_id]
             
             # Create the final summary embed
             embed = discord.Embed(
@@ -602,128 +619,19 @@ class StoryBot(commands.Bot):
                         "⏱️ Export option has expired. Use `/exportstory` to export the story later.",
                         view=export_view
                     )
-                except:
-                    pass
+                except Exception as e:
+                    logger.error(f"Error sending export timeout message: {e}")
             export_view.on_timeout = on_export_timeout
             
             # Send export options
             guild_id = str(interaction.guild_id)
-            is_premium = self.db.is_premium_guild(guild_id)
-            guild_settings = self.db.get_guild_settings(guild_id)
-            
-            expiry_days = guild_settings.get('story_expiry_days')
-            expiry_message = "" if is_premium else f"\n\n**Story will be deleted from the database after {expiry_days} days on the free tier. Export before this time to keep it forever! Alternatively, upgrade to premium for unlimited storage.**"
             
             await interaction.channel.send(
-                f"Would you like to export this story to Google Docs?{expiry_message}", 
+                f"Would you like to export this story to Google Docs? This is a good idea if you want to keep it.", 
                 view=export_view
             )
 
-        @self.tree.command(name="renamestory", description="(Admin) Select a story from a dropdown list and change its title")
-        @app_commands.checks.has_permissions(administrator=True)
-        async def rename_story(interaction: discord.Interaction):
-            """Rename a story"""
-            
-            class TitleModal(Modal):
-                def __init__(self, story_id):
-                    super().__init__(title="Rename Story")
-                    self.story_id = story_id
-                    
-                    # Add text input for the new title
-                    self.title_input = TextInput(
-                        label="New Title",
-                        placeholder="Enter a new title for the story...",
-                        default="",
-                        max_length=100,
-                        required=True,
-                        style=discord.TextStyle.short
-                    )
-                    self.add_item(self.title_input)
-                
-                async def on_submit(self, modal_interaction: discord.Interaction):
-                    # Get the new title from the input
-                    new_title = self.title_input.value
-                    
-                    # Update the story title in the database
-                    self.view.bot.db.update_story(self.story_id, {'title': new_title})
-                    
-                    # Confirm the change to the user
-                    await modal_interaction.response.send_message(f"✅ Story renamed to '{new_title}'")
-            
-            async def on_story_select(interaction: discord.Interaction):
-                # check if user is admin
-                if not interaction.user.guild_permissions.administrator:
-                    await interaction.response.send_message("❌ You must be an administrator to use this command!", ephemeral=True)
-                    return
-
-                selected_story_id = story_select.values[0]
-                
-                # Create and show the modal
-                modal = TitleModal(selected_story_id)
-                modal.view = view  # Pass the view to the modal
-                await interaction.response.send_modal(modal)
-            
-            # Create story selector
-            result = await self.create_story_selector(
-                interaction, 
-                placeholder="Select a story to rename",
-                callback=on_story_select
-            )
-            
-            if result:
-                view, story_select = result
-                view.bot = self  # Pass the bot instance to the view
-                await interaction.response.send_message("Please select a story to rename:", view=view)
-
-        @self.tree.command(name="viewstory", description="(Admin) Select a story and view its details")
-        @app_commands.checks.has_permissions(administrator=True)
-        async def viewstory(interaction: discord.Interaction):
-            """View a story's details"""
-            async def on_story_select(interaction: discord.Interaction):
-                selected_story_id = story_select.values[0]
-                story = self.db.get_story(selected_story_id)
-                if not story:
-                    await interaction.response.send_message("❌ Story not found.")
-                    return
-                
-                # Get contributions
-                contributions = self.db.get_contributions(selected_story_id)
-                contributions_list = [v for v in contributions.values()]
-                
-                # Create embed
-                embed = discord.Embed(
-                    title=f"📜 Story: {story.get('title', 'Untitled')}",
-                    color=discord.Color.blue()
-                )
-
-                # Add whole story text
-                embed.add_field(
-                    name="Story Text",
-                    value=story.get('final_text', ''),
-                    inline=False
-                )
-                
-                # for contrib in contributions_list:
-                #     embed.add_field(
-                #         name=f"{contrib.get('display_name', contrib.get('username', 'Unknown'))}",
-                #         value=contrib.get('content', ''),
-                #         inline=False
-                #     )
-                
-                await interaction.response.send_message(embed=embed)
-            
-            # Create story selector
-            result = await self.create_story_selector(
-                interaction, 
-                placeholder="Select a story to view",
-                callback=on_story_select
-            )
-            
-            if result:
-                view, story_select = result
-                await interaction.response.send_message("Please select a story to view:", view=view)
-
-        @self.tree.command(name="exportstory", description="(Admin) Select a story and export it to a Google Doc")
+        @self.tree.command(name="exportstory", description="(Admin) Export the active story to a Google Doc")
         @app_commands.checks.has_permissions(administrator=True)
         async def export_story(interaction: discord.Interaction):
             """Export a story to Google Docs"""
@@ -731,22 +639,13 @@ class StoryBot(commands.Bot):
                 await interaction.response.send_message("❌ Google Docs export is not available. Please ask the bot administrator to set up the Google API credentials.")
                 return
             
-            # Otherwise, show a dropdown to select a story
-            async def on_story_select(interaction: discord.Interaction):
-                selected_story_id = story_select.values[0]
-                await interaction.response.defer(thinking=True)
-                await self.export_story_by_id(interaction, selected_story_id)
+            if interaction.channel_id not in self.active_stories:
+                await interaction.response.send_message("❌ No active story in this channel!")
+                return
             
-            # Create story selector
-            result = await self.create_story_selector(
-                interaction, 
-                placeholder="Select a story to export",
-                callback=on_story_select
-            )
-            
-            if result:
-                view, story_select = result
-                await interaction.response.send_message("Please select a story to export:", view=view)
+            story = self.active_stories[interaction.channel_id]
+            logger.info(f"Exporting story {story.story_id} in channel {interaction.channel_id}")
+            await self.export_story_by_id(interaction, story.story_id)
 
         @self.tree.command(name="piano", description="I was bored")
         async def piano_ascii_art(interaction: discord.Interaction):
@@ -828,52 +727,6 @@ class StoryBot(commands.Bot):
             
             await interaction.response.send_message(embed=embed)
 
-        @self.tree.command(name="liststories", description="List all stories for this channel")
-        async def list_stories(interaction: discord.Interaction):
-            """List all stories for this channel"""
-            # Get recent stories
-            channel_id = str(interaction.channel_id)
-            
-            recent_stories = self.db.get_recent_stories(channel_id, limit=50)
-            if not recent_stories:
-                await interaction.response.send_message("❌ No stories found for this channel.")
-                return
-            
-            # Create an embed to display the stories
-            embed = discord.Embed(
-                title="📚 Stories in this Channel",
-                description=f"Found {len(recent_stories)} stories:",
-                color=discord.Color.blue()
-            )
-            
-            # Add each story to the embed
-            for story_id, story in recent_stories.items():
-                title = story.get('title', 'Untitled')
-                
-                # Format the date
-                started_at = story.get('started_at')
-                date_str = "Unknown date"
-                if hasattr(started_at, 'timestamp'):
-                    date_str = datetime.fromtimestamp(started_at.timestamp()).strftime("%B %d, %Y")
-                
-                # Check if story is active or completed
-                status = "🏃‍♂️‍➡️ Active" if story.get('ended_at') is None else "✅ Completed"
-                
-                # Get contribution count
-                contribution_count = story.get('contribution_count', 0)
-                
-                # Create field value
-                field_value = f"{status} | {date_str} | {contribution_count} contributions"
-                
-                # Add Google Doc link if available
-                doc_url = story.get('doc_url')
-                if doc_url:
-                    field_value += f"\n[View in Google Docs]({doc_url})"
-                
-                embed.add_field(name=title, value=field_value, inline=False)
-            
-            await interaction.response.send_message(embed=embed)
-
     async def end_story_internal(self, channel_id):
         """Internal method to end a story programmatically"""
         if channel_id not in self.active_stories:
@@ -893,9 +746,6 @@ class StoryBot(commands.Bot):
         })
 
         logger.info(f"Auto-ended story {story.story_id} in channel {channel_id}")
-
-        # Remove the story from active stories
-        del self.active_stories[channel_id]
         
         # Send message to the channel
         channel = self.get_channel(channel_id)
@@ -1028,6 +878,10 @@ class StoryBot(commands.Bot):
         
     async def export_story_by_id(self, interaction: discord.Interaction, story_id: str):
             """Helper method to export a story by ID"""
+            # Defer the interaction to allow for longer processing time
+            if not interaction.response.is_done():
+                await interaction.response.defer()
+            
             # Get story data
             story = self.db.get_story(story_id)
             if not story:
@@ -1040,110 +894,31 @@ class StoryBot(commands.Bot):
             
             # Check if the story already has a Google Doc URL
             if story.get('doc_url'):
-                await interaction.followup.send(f"This story has already been exported to Google Docs: {story['doc_url']}")
+                msg = f"This story has already been exported to Google Docs: {story['doc_url']}"
+                await interaction.followup.send(msg)
                 return
             
             # Export to Google Docs
             success, result = await self.docs_exporter.export_story_to_doc(story, contributions_list)
-            
+
             if success:
                 # Update the doc URL in Firebase
-                self.db.update_story(story_id, {'doc_url': result})
-                await interaction.followup.send(f"✅ Story exported to Google Docs: {result}\n\nIt is recommended to make a copy of the document!")
+                self.db.update_story(story_id, {'doc_url': result, 'isExported': True})
+                msg = f"✅ Story exported to Google Docs: {result}\n\nIt is recommended to make a copy of the document!"
             else:
-                await interaction.followup.send(f"❌ Failed to export story: {result}")
+                msg = f"❌ Failed to export story: {result}"
+
+            await interaction.followup.send(msg)
 
     async def rename_story_by_id(self, interaction: discord.Interaction, story_id: str, new_title: str):
         """Helper method to rename a story by ID"""
         self.db.update_story(story_id, {'title': new_title})
-
-        await interaction.followup.send(f"✅ Story renamed to '{new_title}'")
+        msg = f"✅ Story renamed to '{new_title}'"
+        if not interaction.response.is_done():
+            await interaction.response.send_message(msg)
+        else:
+            await interaction.followup.send(msg)
         return True
-
-    async def create_story_selector(self, interaction: discord.Interaction, channel_id=None, limit=5, 
-                                   placeholder="Select a story", callback=None, include_active=True):
-        """
-        Create a dropdown menu for selecting stories
-        
-        Args:
-            interaction: The Discord interaction
-            channel_id: Channel ID to get stories from (defaults to interaction's channel)
-            limit: Maximum number of stories to show
-            placeholder: Placeholder text for the dropdown
-            callback: Function to call when a story is selected
-            include_active: Whether to include active stories
-        """
-        channel_id = channel_id or str(interaction.channel_id)
-        
-        # Get recent stories
-        recent_stories = self.db.get_recent_stories(channel_id, limit)
-        if not recent_stories:
-            await interaction.response.send_message("❌ No stories found for this channel.")
-            return None
-        
-        # Filter out active stories if needed
-        if not include_active:
-            recent_stories = {k: v for k, v in recent_stories.items() 
-                             if v.get('ended_at') is not None}
-            if not recent_stories:
-                await interaction.response.send_message("❌ No completed stories found for this channel.")
-                return None
-        
-        # Create a list of story titles, dates, and opening texts
-        story_options = []
-        for story_id, story in recent_stories.items():
-            title = story.get('title', 'Untitled')
-            
-            # Format the date
-            started_at = story.get('started_at')
-            date_str = "Unknown date"
-            if hasattr(started_at, 'timestamp'):
-                date_str = datetime.fromtimestamp(started_at.timestamp()).strftime("%b %d, %Y")
-            
-            # Truncate opening text
-            opening = story.get('opening_text', '')
-            if len(opening) > 30:
-                opening = opening[:27] + "..."
-            
-            # Create display text and add to options
-            display_text = f"{title} | {date_str} | {opening}"
-            story_options.append((display_text, story_id))
-        
-        # Create a dropdown menu for the user to select a story
-        story_select = Select(
-            placeholder=placeholder,
-            options=[
-                discord.SelectOption(label=display_text[:100], value=story_id) 
-                for display_text, story_id in story_options
-            ]
-        )
-
-        # Create view with the dropdown and a timeout
-        view = View(timeout=60)  # 60 second timeout
-        view.add_item(story_select)
-        
-        # Add timeout handler
-        async def on_timeout():
-            # Disable all items in the view
-            for item in view.children:
-                item.disabled = True
-            
-            # Update the message to show it's timed out
-            try:
-                await interaction.edit_original_response(
-                    content="⏱️ Selection timed out.",
-                    view=view
-                )
-            except:
-                pass  # Message might have been deleted or already modified
-        
-        view.on_timeout = on_timeout
-        
-        # Set callback if provided
-        if callback:
-            story_select.callback = callback
-        
-        return view, story_select
         
     async def automatic_story_purge(self):
         """Task to automatically purge old stories for free-tier guilds"""
@@ -1151,7 +926,7 @@ class StoryBot(commands.Bot):
         while not self.is_closed():
             try:
                 # Run purge operation
-                results = self.db.purge_old_stories_for_all_guilds(self.docs_exporter)
+                results = self.db.purge_old_stories_in_guilds(self.docs_exporter)
                 
                 # Log results
                 total_purged = sum(results.values())
